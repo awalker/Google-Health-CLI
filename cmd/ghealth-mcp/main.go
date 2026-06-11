@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -104,11 +106,21 @@ func main() {
 			return mcp.NewToolResultError(fmt.Sprintf("Data type %s does not support the list operation.", dataType)), nil
 		}
 
+		if from != "" && from == to && !strings.Contains(from, "T") {
+			t, err := time.Parse("2006-01-02", from)
+			if err == nil {
+				to = t.AddDate(0, 0, 1).Format("2006-01-02")
+			}
+		}
+
 		client, err := newHealthClient()
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to create API client: %v", err)), nil
 		}
 
+		meta := map[string]any{
+			"timezoneNote": "all timestamps are in UTC (Z suffix)",
+		}
 		var response map[string]any
 		filter := registry.FilterFromRange(dt, from, to)
 
@@ -130,16 +142,17 @@ func main() {
 				return mcp.NewToolResultError("unexpected API response: missing dataPoints"), nil
 			}
 			filtered, skipped := clientfilter.FilterDataPoints(pts, dt.ClientTimePath, fromTime, toTime)
-			response = map[string]any{"dataPoints": filtered, "meta": map[string]any{
-				"unfilteredCount": len(pts),
-				"filteredCount":   len(filtered),
-				"skippedCount":    skipped,
-			}}
+			meta["unfilteredCount"] = len(pts)
+			meta["filteredCount"] = len(filtered)
+			meta["skippedCount"] = skipped
+			response = map[string]any{"dataPoints": filtered, "meta": meta}
 		} else {
-			response, err = client.ListDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{Filter: filter})
+			raw, err := client.ListDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{Filter: filter})
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
 			}
+			raw["meta"] = meta
+			response = raw
 		}
 
 		opts := output.Options{
