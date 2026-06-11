@@ -121,28 +121,14 @@ func main() {
 		),
 	)
 
-	s.AddTool(getHealthDataTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args, ok := request.Params.Arguments.(map[string]any)
-		if !ok {
-			args = make(map[string]any)
-		}
-
-		dataType, _ := args["data_type"].(string)
-		from, _ := args["from"].(string)
-		to, _ := args["to"].(string)
-		flatten, _ := args["flatten"].(bool)
-		units, _ := args["units"].(string)
-
-		dt, ok := registry.Lookup(dataType)
-		if !ok {
-			return mcp.NewToolResultError(fmt.Sprintf("Unknown data type: %s. Run get_health_capabilities to see valid types.", dataType)), nil
-		}
-
+	// fetchAndTransform fetches data for a single type and returns the
+	// transformed response map, or an error message string (empty on success).
+	fetchAndTransform := func(ctx context.Context, client *healthapi.Client, dt registry.DataType, from, to string, flatten bool, units string) (map[string]any, error) {
 		hasList := registry.HasOperation(dt, "list")
 		hasRollup := registry.HasOperation(dt, "dailyRollUp")
 
 		if !hasList && !hasRollup {
-			return mcp.NewToolResultError(fmt.Sprintf("Data type %s does not support list or rollup.", dataType)), nil
+			return nil, fmt.Errorf("data type %s does not support list or rollup", dt.EndpointName)
 		}
 
 		if from != "" && from == to && !strings.Contains(from, "T") {
@@ -161,11 +147,6 @@ func main() {
 			}
 		}
 
-		client, err := newHealthClient()
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to create API client: %v", err)), nil
-		}
-
 		meta := map[string]any{
 			"timezoneNote": "all timestamps are in UTC (Z suffix)",
 		}
@@ -177,19 +158,19 @@ func main() {
 			if filter == "" && dt.ClientTimePath != "" && (from != "" || to != "") {
 				fromTime, err := clientfilter.ParseBound(from)
 				if err != nil {
-					return mcp.NewToolResultError(fmt.Sprintf("invalid from: %v", err)), nil
+					return nil, fmt.Errorf("invalid from: %w", err)
 				}
 				toTime, err := clientfilter.ParseBound(to)
 				if err != nil {
-					return mcp.NewToolResultError(fmt.Sprintf("invalid to: %v", err)), nil
+					return nil, fmt.Errorf("invalid to: %w", err)
 				}
 				all, err := client.ListAllDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{PageSize: 500})
 				if err != nil {
-					return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
+					return nil, fmt.Errorf("API error: %w", err)
 				}
 				pts, ok := all["dataPoints"].([]any)
 				if !ok {
-					return mcp.NewToolResultError("unexpected API response: missing dataPoints"), nil
+					return nil, fmt.Errorf("unexpected API response: missing dataPoints")
 				}
 				filtered, skipped := clientfilter.FilterDataPoints(pts, dt.ClientTimePath, fromTime, toTime)
 				meta["unfilteredCount"] = len(pts)
@@ -199,7 +180,7 @@ func main() {
 			} else {
 				raw, err := client.ListDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{Filter: filter, PageSize: 500})
 				if err != nil {
-					return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
+					return nil, fmt.Errorf("API error: %w", err)
 				}
 				nextToken, _ := raw["nextPageToken"].(string)
 				pts, _ := raw["dataPoints"].([]any)
@@ -216,13 +197,13 @@ func main() {
 			if from != "" || to != "" {
 				rangeBody, err := civilRange(from, to)
 				if err != nil {
-					return mcp.NewToolResultError(fmt.Sprintf("invalid date range: %v", err)), nil
+					return nil, fmt.Errorf("invalid date range: %w", err)
 				}
 				body["range"] = rangeBody
 			}
 			raw, err := client.DailyRollUp(ctx, dt.EndpointName, body)
 			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
+				return nil, fmt.Errorf("API error: %w", err)
 			}
 			raw["meta"] = meta
 			response = raw
@@ -232,9 +213,111 @@ func main() {
 			Units:   units,
 			Flatten: flatten,
 		}
-		transformed := output.Transform(response, opts)
+		transformed, _ := output.Transform(response, opts).(map[string]any)
+		if transformed == nil {
+			transformed = response
+		}
+		return transformed, nil
+	}
 
-		jsonBytes, err := json.Marshal(transformed)
+	s.AddTool(getHealthDataTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args, ok := request.Params.Arguments.(map[string]any)
+		if !ok {
+			args = make(map[string]any)
+		}
+
+		dataType, _ := args["data_type"].(string)
+		from, _ := args["from"].(string)
+		to, _ := args["to"].(string)
+		flatten, _ := args["flatten"].(bool)
+		units, _ := args["units"].(string)
+
+		dt, ok := registry.Lookup(dataType)
+		if !ok {
+			return mcp.NewToolResultError(fmt.Sprintf("Unknown data type: %s. Run get_health_capabilities to see valid types.", dataType)), nil
+		}
+
+		client, err := newHealthClient()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to create API client: %v", err)), nil
+		}
+
+		result, err := fetchAndTransform(ctx, client, dt, from, to, flatten, units)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		jsonBytes, err := json.Marshal(result)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(string(jsonBytes)), nil
+	})
+
+	dailySummaryTypes := []string{
+		"steps", "daily-resting-heart-rate", "daily-heart-rate-variability",
+		"weight", "active-zone-minutes", "distance",
+		"daily-oxygen-saturation", "daily-respiratory-rate",
+	}
+
+	getDailySummaryTool := mcp.NewTool("get_daily_summary",
+		mcp.WithDescription("Fetches a daily health overview for a single date, aggregating common types (steps, resting HR, HRV, weight, AZM, distance, SpO2, respiratory rate) into one compact response. Uses flattened output automatically. Optionally specify a custom comma-separated list of types."),
+		mcp.WithString("date",
+			mcp.Required(),
+			mcp.Description("The date to summarize (YYYY-MM-DD)."),
+		),
+		mcp.WithString("types",
+			mcp.Description("Comma-separated list of data types to include. Defaults to all common types. Example: 'steps,weight,sleep'"),
+		),
+		mcp.WithString("units",
+			mcp.Description("Measurement units: 'metric' (default) or 'imperial'."),
+		),
+	)
+
+	s.AddTool(getDailySummaryTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args, ok := request.Params.Arguments.(map[string]any)
+		if !ok {
+			args = make(map[string]any)
+		}
+
+		date, _ := args["date"].(string)
+		typesParam, _ := args["types"].(string)
+		units, _ := args["units"].(string)
+
+		client, err := newHealthClient()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to create API client: %v", err)), nil
+		}
+
+		typesToFetch := dailySummaryTypes
+		if typesParam != "" {
+			parts := strings.Split(typesParam, ",")
+			typesToFetch = make([]string, 0, len(parts))
+			for _, p := range parts {
+				if trimmed := strings.TrimSpace(p); trimmed != "" {
+					typesToFetch = append(typesToFetch, trimmed)
+				}
+			}
+		}
+
+		data := make(map[string]any, len(typesToFetch))
+		for _, typeName := range typesToFetch {
+			dt, ok := registry.Lookup(typeName)
+			if !ok {
+				data[typeName] = map[string]any{"error": "unknown data type"}
+				continue
+			}
+			result, err := fetchAndTransform(ctx, client, dt, date, date, true, units)
+			if err != nil {
+				data[typeName] = map[string]any{"error": err.Error()}
+				continue
+			}
+			data[typeName] = result
+		}
+
+		response := map[string]any{"date": date, "data": data}
+		jsonBytes, err := json.Marshal(response)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
 		}
