@@ -70,6 +70,42 @@ func Types() []DataType {
 	return values
 }
 
+// TypeCapability provides a flattened, agent-friendly summary of what operations
+// and filtering modes a data type supports.
+type TypeCapability struct {
+	Type         string `json:"type"`
+	List         bool   `json:"list"`
+	Rollup       bool   `json:"rollup"`
+	ServerFilter bool   `json:"serverFilter"`
+	ClientFilter bool   `json:"clientFilter"`
+}
+
+// Capabilities returns a sorted slice of TypeCapability for all known data types.
+func Capabilities() []TypeCapability {
+	var caps []TypeCapability
+	for _, dt := range dataTypes {
+		hasList := false
+		hasRollup := false
+		for _, op := range dt.Operations {
+			if op == "list" {
+				hasList = true
+			}
+			if op == "rollup" || op == "dailyRollUp" {
+				hasRollup = true
+			}
+		}
+		caps = append(caps, TypeCapability{
+			Type:         dt.EndpointName,
+			List:         hasList,
+			Rollup:       hasRollup,
+			ServerFilter: dt.Filterable,
+			ClientFilter: dt.ClientTimePath != "",
+		})
+	}
+	sort.Slice(caps, func(i, j int) bool { return caps[i].Type < caps[j].Type })
+	return caps
+}
+
 func Lookup(name string) (DataType, bool) {
 	normalized := strings.TrimSpace(strings.ToLower(name))
 	for _, dataType := range dataTypes {

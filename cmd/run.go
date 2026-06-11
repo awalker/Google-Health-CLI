@@ -361,7 +361,7 @@ func (a *app) config(args []string) error {
 
 func (a *app) types(args []string) error {
 	if len(args) == 0 {
-		return usagef("types requires list or describe")
+		return usagef("types requires list, describe, or capabilities")
 	}
 	switch args[0] {
 	case "list":
@@ -375,6 +375,8 @@ func (a *app) types(args []string) error {
 			return err
 		}
 		return output.Print(a.out, dataType, a.opts)
+	case "capabilities":
+		return output.Print(a.out, registry.Capabilities(), a.opts)
 	default:
 		return usagef("unknown types command %q", args[0])
 	}
