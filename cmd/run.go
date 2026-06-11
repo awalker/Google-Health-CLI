@@ -524,8 +524,8 @@ func (a *app) data(args []string) error {
 			return err
 		}
 		fs := newFlagSet("data " + args[0])
-		from := fs.String("from", "", "start time or date")
-		to := fs.String("to", "", "end time or date")
+		from := fs.String("from", "", "start time/date. Format depends on type: 'YYYY-MM-DD' for rollups, '2006-01-02T15:04:05Z' for physical_time, '2006-01-02T15:04:05' (no Z) for civil_start_time")
+		to := fs.String("to", "", "end time/date. Same format rules as --from")
 		filter := fs.String("filter", "", "raw Google Health filter")
 		limit := fs.Int("limit", 100, "page size")
 		pageToken := fs.String("page-token", "", "next page token")
@@ -545,6 +545,9 @@ func (a *app) data(args []string) error {
 			value, err := client.ReconcileDataPoints(context.Background(), dataType.EndpointName, healthapi.ReconcileOptions{Filter: finalFilter, PageSize: *limit, PageToken: *pageToken, DataSourceFamily: *family})
 			if err != nil {
 				return err
+			}
+			if token, ok := value["nextPageToken"].(string); ok && token != "" {
+				fmt.Fprintf(a.errOut, "Warning: Response truncated to %d items. Use --page-token to fetch the next page, add a --from/--to filter, or increase --limit.\n", *limit)
 			}
 			return output.Print(a.out, value, a.opts)
 		}
@@ -581,6 +584,9 @@ func (a *app) data(args []string) error {
 				return fmt.Errorf("%s does not support the list operation; try: ghealth rollup daily %s", dataType.EndpointName, dataType.EndpointName)
 			}
 			return err
+		}
+		if token, ok := value["nextPageToken"].(string); ok && token != "" {
+			fmt.Fprintf(a.errOut, "Warning: Response truncated to %d items. Use --page-token to fetch the next page, add a --from/--to filter, or increase --limit.\n", *limit)
 		}
 		return output.Print(a.out, value, a.opts)
 	case "get":
