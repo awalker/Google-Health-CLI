@@ -22,8 +22,10 @@ const (
 )
 
 type Options struct {
-	Format string
-	Pretty bool
+	Format  string
+	Pretty  bool
+	Units   string // "metric" or "imperial" (e.g., lbs for weight)
+	Flatten bool   // collapse deeply nested objects into flat structures
 }
 
 type ErrorPayload struct {
