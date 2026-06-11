@@ -131,14 +131,16 @@ func main() {
 			return nil, fmt.Errorf("data type %s does not support list or rollup", dt.EndpointName)
 		}
 
-		if from != "" && from == to && !strings.Contains(from, "T") {
+		singleDateRollup := hasRollup && from != "" && from == to && !strings.Contains(from, "T")
+
+		if !singleDateRollup && from != "" && from == to && !strings.Contains(from, "T") {
 			t, err := time.Parse("2006-01-02", from)
 			if err == nil {
 				to = t.AddDate(0, 0, 1).Format("2006-01-02")
 			}
 		}
 
-		if !strings.Contains(from, "T") && strings.Contains(dt.DefaultTimePath, "physical_time") {
+		if !singleDateRollup && !strings.Contains(from, "T") && strings.Contains(dt.DefaultTimePath, "physical_time") {
 			if from != "" {
 				from += "T00:00:00Z"
 			}
@@ -152,7 +154,20 @@ func main() {
 		}
 		var response map[string]any
 
-		if hasList {
+		if singleDateRollup {
+			body := map[string]any{}
+			rangeBody, err := civilRange(from, to)
+			if err != nil {
+				return nil, fmt.Errorf("invalid date range: %w", err)
+			}
+			body["range"] = rangeBody
+			raw, err := client.DailyRollUp(ctx, dt.EndpointName, body)
+			if err != nil {
+				return nil, fmt.Errorf("API error: %w", err)
+			}
+			raw["meta"] = meta
+			response = raw
+		} else if hasList {
 			filter := registry.FilterFromRange(dt, from, to)
 
 			if filter == "" && dt.ClientTimePath != "" && (from != "" || to != "") {
