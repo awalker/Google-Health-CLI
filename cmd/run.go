@@ -79,6 +79,10 @@ func RunWithWriters(args []string, version string, stdout, stderr io.Writer) int
 	return exitCodeFromError(err)
 }
 
+func (a *app) print(value any) error {
+	return output.Print(a.out, output.Transform(value, a.opts), a.opts)
+}
+
 func (a *app) run() error {
 	args, err := a.parseGlobal(a.args)
 	if err != nil {
@@ -144,6 +148,18 @@ func (a *app) parseGlobal(args []string) ([]string, error) {
 				value = args[i]
 			}
 			a.opts.Format = value
+		case "--units":
+			value := inlineValue
+			if !hasInlineValue {
+				if i+1 >= len(args) {
+					return nil, usagef("--units requires a value (metric or imperial)")
+				}
+				i++
+				value = args[i]
+			}
+			a.opts.Units = strings.ToLower(value)
+		case "--flatten":
+			a.opts.Flatten = true
 		case "--base-url":
 			value := inlineValue
 			if !hasInlineValue {
@@ -261,7 +277,7 @@ func (a *app) doctor(args []string) error {
 		"dataTypes":     len(registry.Types()),
 		"restMethods":   len(registry.RESTOperations()),
 	}
-	return output.Print(a.out, value, a.opts)
+	return a.print(value)
 }
 
 func (a *app) auth(args []string) error {
@@ -459,7 +475,7 @@ func (a *app) identity(args []string) error {
 	if err != nil {
 		return err
 	}
-	return output.Print(a.out, value, a.opts)
+	return a.print(value)
 }
 
 func (a *app) simpleResource(resource string, args []string) error {
@@ -481,7 +497,7 @@ func (a *app) simpleResource(resource string, args []string) error {
 		if err != nil {
 			return err
 		}
-		return output.Print(a.out, value, a.opts)
+		return a.print(value)
 	case "update":
 		fs := newFlagSet(resource + " update")
 		file := fs.String("file", "-", "JSON payload file, or - for stdin")
@@ -502,7 +518,7 @@ func (a *app) simpleResource(resource string, args []string) error {
 		if err != nil {
 			return err
 		}
-		return output.Print(a.out, value, a.opts)
+		return a.print(value)
 	default:
 		return usagef("%s supports get or update", resource)
 	}
@@ -551,7 +567,7 @@ func (a *app) data(args []string) error {
 			if token, ok := value["nextPageToken"].(string); ok && token != "" {
 				fmt.Fprintf(a.errOut, "Warning: Response truncated to %d items. Use --page-token to fetch the next page, add a --from/--to filter, or increase --limit.\n", *limit)
 			}
-			return output.Print(a.out, value, a.opts)
+			return a.print(value)
 		}
 		// Client-side date filtering: fetch all pages then filter in Go.
 		// Used for types where the API does not support server-side filters.
@@ -590,7 +606,7 @@ func (a *app) data(args []string) error {
 		if token, ok := value["nextPageToken"].(string); ok && token != "" {
 			fmt.Fprintf(a.errOut, "Warning: Response truncated to %d items. Use --page-token to fetch the next page, add a --from/--to filter, or increase --limit.\n", *limit)
 		}
-		return output.Print(a.out, value, a.opts)
+		return a.print(value)
 	case "get":
 		if len(args) < 3 {
 			return usagef("data get requires type and id")
@@ -603,7 +619,7 @@ func (a *app) data(args []string) error {
 		if err != nil {
 			return err
 		}
-		return output.Print(a.out, value, a.opts)
+		return a.print(value)
 	case "create", "patch", "delete":
 		return a.writeData(client, args)
 	case "export-tcx":
@@ -669,7 +685,7 @@ func (a *app) writeData(client *healthapi.Client, args []string) error {
 	if err != nil {
 		return err
 	}
-	return output.Print(a.out, value, a.opts)
+	return a.print(value)
 }
 
 func (a *app) rollup(args []string) error {
@@ -746,7 +762,7 @@ func (a *app) rollup(args []string) error {
 	if err != nil {
 		return err
 	}
-	return output.Print(a.out, value, a.opts)
+	return a.print(value)
 }
 
 func (a *app) subscribers(args []string) error {
@@ -771,7 +787,7 @@ func (a *app) subscribers(args []string) error {
 		if err != nil {
 			return err
 		}
-		return output.Print(a.out, value, a.opts)
+		return a.print(value)
 	case "create":
 		fs := newFlagSet("subscribers create")
 		projectFlag := fs.String("project", project, "Google Cloud project")
@@ -788,7 +804,7 @@ func (a *app) subscribers(args []string) error {
 		if err != nil {
 			return err
 		}
-		return output.Print(a.out, value, a.opts)
+		return a.print(value)
 	case "patch":
 		fs := newFlagSet("subscribers patch")
 		name := fs.String("name", "", "subscriber resource name")
@@ -808,7 +824,7 @@ func (a *app) subscribers(args []string) error {
 		if err != nil {
 			return err
 		}
-		return output.Print(a.out, value, a.opts)
+		return a.print(value)
 	case "delete":
 		fs := newFlagSet("subscribers delete")
 		name := fs.String("name", "", "subscriber resource name")
@@ -827,7 +843,7 @@ func (a *app) subscribers(args []string) error {
 		if err != nil {
 			return err
 		}
-		return output.Print(a.out, value, a.opts)
+		return a.print(value)
 	default:
 		return usagef("unknown subscribers command %q", args[0])
 	}
@@ -869,7 +885,7 @@ func (a *app) api(args []string) error {
 	if err != nil {
 		return err
 	}
-	return output.Print(a.out, value, a.opts)
+	return a.print(value)
 }
 
 func (a *app) client() (*healthapi.Client, error) {
