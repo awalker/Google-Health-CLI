@@ -439,10 +439,59 @@ func assertArray(field string, wantLen int) func(*testing.T, any) {
 	}
 }
 
+// TestListAllDataPointsPaginates verifies that ListAllDataPoints follows
+// nextPageToken across multiple pages and merges all dataPoints into one slice.
+func TestListAllDataPointsPaginates(t *testing.T) {
+	pages := []string{
+		`{"dataPoints":[{"exercise":{"displayName":"Walk"}},{"exercise":{"displayName":"Run"}}],"nextPageToken":"page2"}`,
+		`{"dataPoints":[{"exercise":{"displayName":"Bike"}}],"nextPageToken":"page3"}`,
+		`{"dataPoints":[{"exercise":{"displayName":"Swim"}}]}`,
+	}
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(pages[callCount]))
+		callCount++
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "users/me", server.Client())
+	result, err := client.ListAllDataPoints(context.Background(), "exercise", ListOptions{PageSize: 2})
+	if err != nil {
+		t.Fatalf("ListAllDataPoints failed: %v", err)
+	}
+	pts, ok := result["dataPoints"].([]any)
+	if !ok {
+		t.Fatalf("dataPoints not []any: %T", result["dataPoints"])
+	}
+	if len(pts) != 4 {
+		t.Errorf("len(dataPoints) = %d, want 4", len(pts))
+	}
+	if callCount != 3 {
+		t.Errorf("callCount = %d, want 3", callCount)
+	}
+}
+
+// TestListAllDataPointsSinglePage verifies single-page responses work correctly.
+func TestListAllDataPointsSinglePage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"dataPoints":[{"sleep":{"type":"STAGES"}},{"sleep":{"type":"CLASSIC"}}]}`))
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "users/me", server.Client())
+	result, err := client.ListAllDataPoints(context.Background(), "sleep", ListOptions{})
+	if err != nil {
+		t.Fatalf("ListAllDataPoints failed: %v", err)
+	}
+	pts, _ := result["dataPoints"].([]any)
+	if len(pts) != 2 {
+		t.Errorf("len(dataPoints) = %d, want 2", len(pts))
+	}
+}
+
 // TestListDataPointsNonFilterableOmitsFilter verifies that ListDataPoints with
-// an empty filter string sends no "filter" query parameter to the API. This
-// covers the behaviour triggered when registry.FilterFromRange returns "" for
-// non-filterable types (exercise, sleep, daily-resting-heart-rate).
 func TestListDataPointsNonFilterableOmitsFilter(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := r.URL.Query()["filter"]; ok {

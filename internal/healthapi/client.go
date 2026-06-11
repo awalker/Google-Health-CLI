@@ -137,6 +137,35 @@ func (c *Client) ListDataPoints(ctx context.Context, dataType string, opts ListO
 	return c.get(ctx, c.dataPointsPath(dataType), query)
 }
 
+// ListAllDataPoints fetches every page for a data type, accumulating all data
+// points into a single response map with key "dataPoints". Use this for
+// client-side filtering workflows where a server-side filter is not supported.
+// PageSize defaults to 100 if not set. The returned map also contains the last
+// page's nextPageToken (empty string when all pages are consumed).
+func (c *Client) ListAllDataPoints(ctx context.Context, dataType string, opts ListOptions) (map[string]any, error) {
+	if opts.PageSize <= 0 {
+		opts.PageSize = 100
+	}
+	var allPoints []any
+	token := opts.PageToken
+	for {
+		opts.PageToken = token
+		page, err := c.ListDataPoints(ctx, dataType, opts)
+		if err != nil {
+			return nil, err
+		}
+		if pts, ok := page["dataPoints"].([]any); ok {
+			allPoints = append(allPoints, pts...)
+		}
+		next, _ := page["nextPageToken"].(string)
+		if next == "" {
+			break
+		}
+		token = next
+	}
+	return map[string]any{"dataPoints": allPoints}, nil
+}
+
 func (c *Client) ReconcileDataPoints(ctx context.Context, dataType string, opts ReconcileOptions) (map[string]any, error) {
 	query := url.Values{}
 	if opts.Filter != "" {
