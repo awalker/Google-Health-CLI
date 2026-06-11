@@ -2,6 +2,7 @@
 
 build:
 	go build -o ghealth .
+	go build -o ghealth-mcp ./cmd/ghealth-mcp
 
 test:
 	go test ./...
