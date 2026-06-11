@@ -197,14 +197,19 @@ func main() {
 				meta["skippedCount"] = skipped
 				response = map[string]any{"dataPoints": filtered, "meta": meta}
 			} else {
-				all, err := client.ListAllDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{Filter: filter, PageSize: 500})
+				raw, err := client.ListDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{Filter: filter, PageSize: 500})
 				if err != nil {
 					return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
 				}
-				pts, _ := all["dataPoints"].([]any)
+				nextToken, _ := raw["nextPageToken"].(string)
+				pts, _ := raw["dataPoints"].([]any)
 				meta["totalCount"] = len(pts)
-				all["meta"] = meta
-				response = all
+				if nextToken != "" {
+					meta["truncated"] = true
+					meta["hint"] = "narrow the date range to get the full result set"
+				}
+				raw["meta"] = meta
+				response = raw
 			}
 		} else {
 			body := map[string]any{}
