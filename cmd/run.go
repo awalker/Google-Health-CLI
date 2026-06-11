@@ -536,6 +536,9 @@ func (a *app) data(args []string) error {
 		finalFilter := *filter
 		if finalFilter == "" {
 			finalFilter = registry.FilterFromRange(dataType, *from, *to)
+			if finalFilter == "" && !dataType.Filterable && (*from != "" || *to != "") {
+				fmt.Fprintf(a.errOut, "Note: %s does not support server-side date filtering. Returning all data.\n", dataType.EndpointName)
+			}
 		}
 		if args[0] == "reconcile" {
 			value, err := client.ReconcileDataPoints(context.Background(), dataType.EndpointName, healthapi.ReconcileOptions{Filter: finalFilter, PageSize: *limit, PageToken: *pageToken, DataSourceFamily: *family})
@@ -546,6 +549,10 @@ func (a *app) data(args []string) error {
 		}
 		value, err := client.ListDataPoints(context.Background(), dataType.EndpointName, healthapi.ListOptions{Filter: finalFilter, PageSize: *limit, PageToken: *pageToken, View: *view})
 		if err != nil {
+			var apiErr *healthapi.APIError
+			if errors.As(err, &apiErr) && strings.Contains(apiErr.Body, "UNSUPPORTED_DATA_TYPE_ACTION") {
+				return fmt.Errorf("%s does not support the list operation; try: ghealth rollup daily %s", dataType.EndpointName, dataType.EndpointName)
+			}
 			return err
 		}
 		return output.Print(a.out, value, a.opts)

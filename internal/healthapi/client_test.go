@@ -438,3 +438,49 @@ func assertArray(field string, wantLen int) func(*testing.T, any) {
 		}
 	}
 }
+
+// TestListDataPointsNonFilterableOmitsFilter verifies that ListDataPoints with
+// an empty filter string sends no "filter" query parameter to the API. This
+// covers the behaviour triggered when registry.FilterFromRange returns "" for
+// non-filterable types (exercise, sleep, daily-resting-heart-rate).
+func TestListDataPointsNonFilterableOmitsFilter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.URL.Query()["filter"]; ok {
+			t.Fatalf("unexpected filter query param on non-filterable request: %s", r.URL.Query().Get("filter"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"dataPoints":[]}`))
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "users/me", server.Client())
+	// Empty filter simulates what FilterFromRange returns for non-filterable types.
+	_, err := client.ListDataPoints(context.Background(), "exercise", ListOptions{Filter: "", PageSize: 100})
+	if err != nil {
+		t.Fatalf("ListDataPoints failed: %v", err)
+	}
+}
+
+// TestListDataPointsUnsupportedDataTypeActionError verifies that a 400 response
+// containing UNSUPPORTED_DATA_TYPE_ACTION is surfaced as an APIError with the
+// right status code, so callers (cmd/run.go) can detect and rewrite the message.
+func TestListDataPointsUnsupportedDataTypeActionError(t *testing.T) {
+	const body = `{"error":{"code":400,"message":"UNSUPPORTED_DATA_TYPE_ACTION","status":"INVALID_ARGUMENT"}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, body, http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "users/me", server.Client())
+	_, err := client.ListDataPoints(context.Background(), "total-calories", ListOptions{})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error = %T, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("StatusCode = %d, want %d", apiErr.StatusCode, http.StatusBadRequest)
+	}
+	if !strings.Contains(apiErr.Body, "UNSUPPORTED_DATA_TYPE_ACTION") {
+		t.Fatalf("Body = %q; want it to contain UNSUPPORTED_DATA_TYPE_ACTION", apiErr.Body)
+	}
+}
