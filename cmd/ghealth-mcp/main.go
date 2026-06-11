@@ -42,6 +42,42 @@ func newHealthClient() (*healthapi.Client, error) {
 	return healthapi.New(cfg.BaseURL, cfg.User, httpClient), nil
 }
 
+// civilRange builds a daily rollup range body from date-only strings,
+// matching the format used by the Google Health API's dailyRollUp endpoint.
+func civilRange(from, to string) (map[string]any, error) {
+	result := map[string]any{}
+	if from != "" {
+		start, err := parseCivilDate(from)
+		if err != nil {
+			return nil, fmt.Errorf("from: %w", err)
+		}
+		result["start"] = start
+	}
+	if to != "" {
+		end, err := parseCivilDate(to)
+		if err != nil {
+			return nil, fmt.Errorf("to: %w", err)
+		}
+		result["end"] = end
+	}
+	return result, nil
+}
+
+func parseCivilDate(s string) (map[string]any, error) {
+	datePart, _, _ := strings.Cut(s, "T")
+	t, err := time.Parse("2006-01-02", datePart)
+	if err != nil {
+		return nil, fmt.Errorf("expected YYYY-MM-DD: %w", err)
+	}
+	return map[string]any{
+		"date": map[string]any{
+			"year":  t.Year(),
+			"month": int(t.Month()),
+			"day":   t.Day(),
+		},
+	}, nil
+}
+
 func main() {
 	s := server.NewMCPServer(
 		"ghealth-mcp",
@@ -102,14 +138,26 @@ func main() {
 			return mcp.NewToolResultError(fmt.Sprintf("Unknown data type: %s. Run get_health_capabilities to see valid types.", dataType)), nil
 		}
 
-		if !registry.HasOperation(dt, "list") {
-			return mcp.NewToolResultError(fmt.Sprintf("Data type %s does not support the list operation.", dataType)), nil
+		hasList := registry.HasOperation(dt, "list")
+		hasRollup := registry.HasOperation(dt, "dailyRollUp")
+
+		if !hasList && !hasRollup {
+			return mcp.NewToolResultError(fmt.Sprintf("Data type %s does not support list or rollup.", dataType)), nil
 		}
 
 		if from != "" && from == to && !strings.Contains(from, "T") {
 			t, err := time.Parse("2006-01-02", from)
 			if err == nil {
 				to = t.AddDate(0, 0, 1).Format("2006-01-02")
+			}
+		}
+
+		if !strings.Contains(from, "T") && strings.Contains(dt.DefaultTimePath, "physical_time") {
+			if from != "" {
+				from += "T00:00:00Z"
+			}
+			if to != "" && !strings.Contains(to, "T") {
+				to += "T00:00:00Z"
 			}
 		}
 
@@ -122,32 +170,52 @@ func main() {
 			"timezoneNote": "all timestamps are in UTC (Z suffix)",
 		}
 		var response map[string]any
-		filter := registry.FilterFromRange(dt, from, to)
 
-		if filter == "" && dt.ClientTimePath != "" && (from != "" || to != "") {
-			fromTime, err := clientfilter.ParseBound(from)
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("invalid from: %v", err)), nil
+		if hasList {
+			filter := registry.FilterFromRange(dt, from, to)
+
+			if filter == "" && dt.ClientTimePath != "" && (from != "" || to != "") {
+				fromTime, err := clientfilter.ParseBound(from)
+				if err != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("invalid from: %v", err)), nil
+				}
+				toTime, err := clientfilter.ParseBound(to)
+				if err != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("invalid to: %v", err)), nil
+				}
+				all, err := client.ListAllDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{PageSize: 500})
+				if err != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
+				}
+				pts, ok := all["dataPoints"].([]any)
+				if !ok {
+					return mcp.NewToolResultError("unexpected API response: missing dataPoints"), nil
+				}
+				filtered, skipped := clientfilter.FilterDataPoints(pts, dt.ClientTimePath, fromTime, toTime)
+				meta["unfilteredCount"] = len(pts)
+				meta["filteredCount"] = len(filtered)
+				meta["skippedCount"] = skipped
+				response = map[string]any{"dataPoints": filtered, "meta": meta}
+			} else {
+				all, err := client.ListAllDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{Filter: filter, PageSize: 500})
+				if err != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
+				}
+				pts, _ := all["dataPoints"].([]any)
+				meta["totalCount"] = len(pts)
+				all["meta"] = meta
+				response = all
 			}
-			toTime, err := clientfilter.ParseBound(to)
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("invalid to: %v", err)), nil
-			}
-			all, err := client.ListAllDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{PageSize: 500})
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
-			}
-			pts, ok := all["dataPoints"].([]any)
-			if !ok {
-				return mcp.NewToolResultError("unexpected API response: missing dataPoints"), nil
-			}
-			filtered, skipped := clientfilter.FilterDataPoints(pts, dt.ClientTimePath, fromTime, toTime)
-			meta["unfilteredCount"] = len(pts)
-			meta["filteredCount"] = len(filtered)
-			meta["skippedCount"] = skipped
-			response = map[string]any{"dataPoints": filtered, "meta": meta}
 		} else {
-			raw, err := client.ListDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{Filter: filter})
+			body := map[string]any{}
+			if from != "" || to != "" {
+				rangeBody, err := civilRange(from, to)
+				if err != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("invalid date range: %v", err)), nil
+				}
+				body["range"] = rangeBody
+			}
+			raw, err := client.DailyRollUp(ctx, dt.EndpointName, body)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
 			}
