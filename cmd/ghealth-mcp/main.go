@@ -2,44 +2,67 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"golang.org/x/oauth2"
+
+	"github.com/rudrankriyam/Google-Health-CLI/internal/auth"
+	"github.com/rudrankriyam/Google-Health-CLI/internal/clientfilter"
+	"github.com/rudrankriyam/Google-Health-CLI/internal/config"
+	"github.com/rudrankriyam/Google-Health-CLI/internal/healthapi"
+	"github.com/rudrankriyam/Google-Health-CLI/internal/output"
 	"github.com/rudrankriyam/Google-Health-CLI/internal/registry"
 )
 
+// newHealthClient loads the local config, creates an OAuth token source,
+// and returns an authenticated healthapi.Client.
+func newHealthClient() (*healthapi.Client, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+
+	source, err := auth.TokenSource(context.Background(), cfg)
+	if err != nil {
+		return nil, fmt.Errorf("authentication error: %w", err)
+	}
+
+	httpClient := oauth2.NewClient(context.Background(), source)
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	return healthapi.New(cfg.BaseURL, cfg.User, httpClient), nil
+}
+
 func main() {
-	// Create a new MCP server
 	s := server.NewMCPServer(
 		"ghealth-mcp",
 		"1.0.0",
 		server.WithToolCapabilities(true),
 	)
 
-	// Tool 1: Get Health Capabilities
-	// Returns a clean, low-token matrix of what each data type supports
 	getCapabilitiesTool := mcp.NewTool("get_health_capabilities",
 		mcp.WithDescription("Returns a list of all 31 Google Health data types and their supported operations (list, rollup, serverFilter, clientFilter). Use this before querying data to avoid unsupported operations."),
 	)
 
 	s.AddTool(getCapabilitiesTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		caps := registry.Capabilities()
-		
-		// Format as a clean, readable text response for the LLM, or JSON
-		// Using JSON here so the LLM can parse it easily if needed, but MCP text is often safer
+
 		result := "Supported Google Health Data Types Capabilities:\n\n"
 		for _, cap := range caps {
 			result += fmt.Sprintf("- **%s**: list=%v, rollup=%v, serverFilter=%v, clientFilter=%v\n",
 				cap.Type, cap.List, cap.Rollup, cap.ServerFilter, cap.ClientFilter)
 		}
-		
+
 		return mcp.NewToolResultText(result), nil
 	})
 
-	// Tool 2: Get Health Data (Stub for demonstration of parameter handling)
-	// In the next iteration, this will wire up to internal/healthapi and internal/output
 	getHealthDataTool := mcp.NewTool("get_health_data",
 		mcp.WithDescription("Fetches health data for a specific type. Use get_health_capabilities first to verify the type supports 'list' or 'rollup'."),
 		mcp.WithString("data_type",
@@ -72,25 +95,68 @@ func main() {
 		flatten, _ := args["flatten"].(bool)
 		units, _ := args["units"].(string)
 
-		// Validate data type exists using our existing registry
 		dt, ok := registry.Lookup(dataType)
 		if !ok {
 			return mcp.NewToolResultError(fmt.Sprintf("Unknown data type: %s. Run get_health_capabilities to see valid types.", dataType)), nil
 		}
 
-		// TODO: Wire up internal/healthapi.Client.ListDataPoints or ListAllDataPoints here
-		// TODO: Pass results through internal/output.Transform with Flatten and Units options
+		if !registry.HasOperation(dt, "list") {
+			return mcp.NewToolResultError(fmt.Sprintf("Data type %s does not support the list operation.", dataType)), nil
+		}
 
-		response := fmt.Sprintf("[STUB] Successfully validated request for type: '%s' (Filterable: %v, ClientTimePath: %v). "+
-			"Date range: %s to %s. Flatten: %v, Units: %s. \n\n"+
-			"Next step: Wire this tool to internal/healthapi and internal/output to fetch and transform the actual data.",
-			dt.EndpointName, dt.Filterable, dt.ClientTimePath != "", from, to, flatten, units)
+		client, err := newHealthClient()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to create API client: %v", err)), nil
+		}
 
-		return mcp.NewToolResultText(response), nil
+		var response map[string]any
+		filter := registry.FilterFromRange(dt, from, to)
+
+		if filter == "" && dt.ClientTimePath != "" && (from != "" || to != "") {
+			fromTime, err := clientfilter.ParseBound(from)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid from: %v", err)), nil
+			}
+			toTime, err := clientfilter.ParseBound(to)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid to: %v", err)), nil
+			}
+			all, err := client.ListAllDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{PageSize: 500})
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
+			}
+			pts, ok := all["dataPoints"].([]any)
+			if !ok {
+				return mcp.NewToolResultError("unexpected API response: missing dataPoints"), nil
+			}
+			filtered, skipped := clientfilter.FilterDataPoints(pts, dt.ClientTimePath, fromTime, toTime)
+			response = map[string]any{"dataPoints": filtered, "meta": map[string]any{
+				"unfilteredCount": len(pts),
+				"filteredCount":   len(filtered),
+				"skippedCount":    skipped,
+			}}
+		} else {
+			response, err = client.ListDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{Filter: filter})
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
+			}
+		}
+
+		opts := output.Options{
+			Units:   units,
+			Flatten: flatten,
+		}
+		transformed := output.Transform(response, opts)
+
+		jsonBytes, err := json.Marshal(transformed)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(string(jsonBytes)), nil
 	})
 
 	log.Println("Starting ghealth-mcp server on stdio...")
-	// Start the stdio server (blocks)
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
