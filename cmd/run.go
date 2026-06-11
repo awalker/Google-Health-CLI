@@ -16,6 +16,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/rudrankriyam/Google-Health-CLI/internal/auth"
+	"github.com/rudrankriyam/Google-Health-CLI/internal/clientfilter"
 	"github.com/rudrankriyam/Google-Health-CLI/internal/config"
 	"github.com/rudrankriyam/Google-Health-CLI/internal/healthapi"
 	"github.com/rudrankriyam/Google-Health-CLI/internal/output"
@@ -536,7 +537,7 @@ func (a *app) data(args []string) error {
 		finalFilter := *filter
 		if finalFilter == "" {
 			finalFilter = registry.FilterFromRange(dataType, *from, *to)
-			if finalFilter == "" && !dataType.Filterable && (*from != "" || *to != "") {
+			if finalFilter == "" && !dataType.Filterable && (*from != "" || *to != "") && dataType.ClientTimePath == "" {
 				fmt.Fprintf(a.errOut, "Note: %s does not support server-side date filtering. Returning all data.\n", dataType.EndpointName)
 			}
 		}
@@ -546,6 +547,32 @@ func (a *app) data(args []string) error {
 				return err
 			}
 			return output.Print(a.out, value, a.opts)
+		}
+		// Client-side date filtering: fetch all pages then filter in Go.
+		// Used for types where the API does not support server-side filters.
+		if finalFilter == "" && dataType.ClientTimePath != "" && (*from != "" || *to != "") {
+			fromTime, err := clientfilter.ParseBound(*from)
+			if err != nil {
+				return fmt.Errorf("--from: %w", err)
+			}
+			toTime, err := clientfilter.ParseBound(*to)
+			if err != nil {
+				return fmt.Errorf("--to: %w", err)
+			}
+			all, err := client.ListAllDataPoints(context.Background(), dataType.EndpointName, healthapi.ListOptions{PageSize: *limit, View: *view})
+			if err != nil {
+				var apiErr *healthapi.APIError
+				if errors.As(err, &apiErr) && strings.Contains(apiErr.Body, "UNSUPPORTED_DATA_TYPE_ACTION") {
+					return fmt.Errorf("%s does not support the list operation; try: ghealth rollup daily %s", dataType.EndpointName, dataType.EndpointName)
+				}
+				return err
+			}
+			pts, _ := all["dataPoints"].([]any)
+			filtered, skipped := clientfilter.FilterDataPoints(pts, dataType.ClientTimePath, fromTime, toTime)
+			if skipped > 0 {
+				fmt.Fprintf(a.errOut, "Warning: %d data point(s) skipped (timestamp could not be parsed).\n", skipped)
+			}
+			return output.Print(a.out, map[string]any{"dataPoints": filtered}, a.opts)
 		}
 		value, err := client.ListDataPoints(context.Background(), dataType.EndpointName, healthapi.ListOptions{Filter: finalFilter, PageSize: *limit, PageToken: *pageToken, View: *view})
 		if err != nil {
