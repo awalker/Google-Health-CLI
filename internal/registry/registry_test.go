@@ -76,3 +76,45 @@ func TestKnownFilterableTypes(t *testing.T) {
 		}
 	}
 }
+
+func TestAZMHasListOperation(t *testing.T) {
+	dt, ok := Lookup("active-zone-minutes")
+	if !ok {
+		t.Fatal("Lookup('active-zone-minutes') failed")
+	}
+	if !HasOperation(dt, "list") {
+		t.Error("active-zone-minutes should have 'list' operation")
+	}
+	if !HasOperation(dt, "dailyRollUp") {
+		t.Error("active-zone-minutes should have 'dailyRollUp' operation")
+	}
+}
+
+func TestCapabilitiesIncludeAZMWithList(t *testing.T) {
+	caps := Capabilities()
+	for _, cap := range caps {
+		if cap.Type == "active-zone-minutes" {
+			if !cap.List {
+				t.Error("active-zone-minutes capability should have list=true")
+			}
+			if !cap.Rollup {
+				t.Error("active-zone-minutes capability should have rollup=true")
+			}
+			return
+		}
+	}
+	t.Fatal("active-zone-minutes not found in capabilities")
+}
+
+func TestRollupCapableTypes(t *testing.T) {
+	rollupTypes := []string{"steps", "distance", "active-zone-minutes", "total-calories"}
+	for _, name := range rollupTypes {
+		dt, ok := Lookup(name)
+		if !ok {
+			t.Fatalf("Lookup(%q) failed", name)
+		}
+		if !HasOperation(dt, "dailyRollUp") {
+			t.Errorf("%s should have dailyRollUp operation", name)
+		}
+	}
+}
