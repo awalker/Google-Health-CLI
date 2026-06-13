@@ -86,6 +86,143 @@ func parseCivilDate(s string) (map[string]any, error) {
 	}, nil
 }
 
+// fetchAndTransform fetches data for a single type and returns the
+// transformed response map, or an error message string (empty on success).
+func fetchAndTransform(ctx context.Context, client *healthapi.Client, dt registry.DataType, from, to string, flatten bool, units string, rollup bool, pageSize int) (map[string]any, error) {
+	hasList := registry.HasOperation(dt, "list")
+	hasRollup := registry.HasOperation(dt, "dailyRollUp")
+
+	if !hasList && !hasRollup {
+		return nil, fmt.Errorf("data type %s does not support list or rollup", dt.EndpointName)
+	}
+
+	singleDateRollup := hasRollup && from != "" && from == to && !strings.Contains(from, "T")
+
+	if !singleDateRollup && from != "" && from == to && !strings.Contains(from, "T") {
+		t, err := time.Parse("2006-01-02", from)
+		if err == nil {
+			to = t.AddDate(0, 0, 1).Format("2006-01-02")
+		}
+	}
+
+	if !singleDateRollup && !strings.Contains(from, "T") && strings.Contains(dt.DefaultTimePath, "physical_time") {
+		if from != "" {
+			from += "T00:00:00Z"
+		}
+		if to != "" && !strings.Contains(to, "T") {
+			to += "T00:00:00Z"
+		}
+	}
+
+	meta := map[string]any{
+		"timezoneNote": "all timestamps are in UTC (Z suffix)",
+	}
+	var response map[string]any
+
+	if rollup && hasRollup {
+		body := map[string]any{}
+		if from != "" || to != "" {
+			rangeBody, err := civilRange(from, to)
+			if err != nil {
+				return nil, fmt.Errorf("invalid date range: %w", err)
+			}
+			body["range"] = rangeBody
+		}
+		raw, err := client.DailyRollUp(ctx, dt.EndpointName, body)
+		if err != nil {
+			return nil, fmt.Errorf("API error: %w", err)
+		}
+		raw["meta"] = meta
+		response = raw
+	} else if singleDateRollup {
+		body := map[string]any{}
+		rangeBody, err := civilRange(from, to)
+		if err != nil {
+			return nil, fmt.Errorf("invalid date range: %w", err)
+		}
+		body["range"] = rangeBody
+		raw, err := client.DailyRollUp(ctx, dt.EndpointName, body)
+		if err != nil {
+			return nil, fmt.Errorf("API error: %w", err)
+		}
+		raw["meta"] = meta
+		response = raw
+	} else if hasList {
+		filter := registry.FilterFromRange(dt, from, to)
+
+		if filter == "" && dt.ClientTimePath != "" && (from != "" || to != "") {
+			fromTime, err := clientfilter.ParseBound(from)
+			if err != nil {
+				return nil, fmt.Errorf("invalid from: %w", err)
+			}
+			toTime, err := clientfilter.ParseBound(to)
+			if err != nil {
+				return nil, fmt.Errorf("invalid to: %w", err)
+			}
+			listOpts := healthapi.ListOptions{PageSize: 500}
+			if pageSize > 0 {
+				listOpts.PageSize = pageSize
+			}
+			all, err := client.ListAllDataPoints(ctx, dt.EndpointName, listOpts)
+			if err != nil {
+				return nil, fmt.Errorf("API error: %w", err)
+			}
+			pts, ok := all["dataPoints"].([]any)
+			if !ok {
+				return nil, fmt.Errorf("unexpected API response: missing dataPoints")
+			}
+			filtered, skipped := clientfilter.FilterDataPoints(pts, dt.ClientTimePath, fromTime, toTime)
+			meta["unfilteredCount"] = len(pts)
+			meta["filteredCount"] = len(filtered)
+			meta["skippedCount"] = skipped
+			response = map[string]any{"dataPoints": filtered, "meta": meta}
+		} else {
+			listOpts := healthapi.ListOptions{Filter: filter, PageSize: 500}
+			if pageSize > 0 {
+				listOpts.PageSize = pageSize
+			}
+			raw, err := client.ListDataPoints(ctx, dt.EndpointName, listOpts)
+			if err != nil {
+				return nil, fmt.Errorf("API error: %w", err)
+			}
+			nextToken, _ := raw["nextPageToken"].(string)
+			pts, _ := raw["dataPoints"].([]any)
+			meta["totalCount"] = len(pts)
+			if nextToken != "" {
+				meta["truncated"] = true
+				meta["hint"] = "narrow the date range to get the full result set"
+			}
+			raw["meta"] = meta
+			response = raw
+		}
+	} else {
+		body := map[string]any{}
+		if from != "" || to != "" {
+			rangeBody, err := civilRange(from, to)
+			if err != nil {
+				return nil, fmt.Errorf("invalid date range: %w", err)
+			}
+			body["range"] = rangeBody
+		}
+		raw, err := client.DailyRollUp(ctx, dt.EndpointName, body)
+		if err != nil {
+			return nil, fmt.Errorf("API error: %w", err)
+		}
+		raw["meta"] = meta
+		response = raw
+	}
+
+	opts := output.Options{
+		Units:   units,
+		Flatten: flatten,
+	}
+	transformed, _ := output.Transform(response, opts).(map[string]any)
+	if transformed == nil {
+		transformed = response
+	}
+	return transformed, nil
+}
+
 func main() {
 	s := server.NewMCPServer(
 		"ghealth-mcp",
@@ -127,121 +264,16 @@ func main() {
 		mcp.WithString("units",
 			mcp.Description("Measurement units: 'metric' (default) or 'imperial' (adds weightLbs, distanceMiles)."),
 		),
+		mcp.WithBoolean("rollup",
+			mcp.Description("If true, uses the dailyRollUp endpoint to return aggregated daily values instead of raw per-minute data. Recommended for multi-date queries on steps, distance, and active-zone-minutes."),
+		),
+		mcp.WithString("page_token",
+			mcp.Description("Pagination token from a previous response's nextPageToken. When set, ignores from/to and fetches the next page of raw list results."),
+		),
+		mcp.WithNumber("page_size",
+			mcp.Description("Number of results per page for list queries. Default 500."),
+		),
 	)
-
-	// fetchAndTransform fetches data for a single type and returns the
-	// transformed response map, or an error message string (empty on success).
-	fetchAndTransform := func(ctx context.Context, client *healthapi.Client, dt registry.DataType, from, to string, flatten bool, units string) (map[string]any, error) {
-		hasList := registry.HasOperation(dt, "list")
-		hasRollup := registry.HasOperation(dt, "dailyRollUp")
-
-		if !hasList && !hasRollup {
-			return nil, fmt.Errorf("data type %s does not support list or rollup", dt.EndpointName)
-		}
-
-		singleDateRollup := hasRollup && from != "" && from == to && !strings.Contains(from, "T")
-
-		if !singleDateRollup && from != "" && from == to && !strings.Contains(from, "T") {
-			t, err := time.Parse("2006-01-02", from)
-			if err == nil {
-				to = t.AddDate(0, 0, 1).Format("2006-01-02")
-			}
-		}
-
-		if !singleDateRollup && !strings.Contains(from, "T") && strings.Contains(dt.DefaultTimePath, "physical_time") {
-			if from != "" {
-				from += "T00:00:00Z"
-			}
-			if to != "" && !strings.Contains(to, "T") {
-				to += "T00:00:00Z"
-			}
-		}
-
-		meta := map[string]any{
-			"timezoneNote": "all timestamps are in UTC (Z suffix)",
-		}
-		var response map[string]any
-
-		if singleDateRollup {
-			body := map[string]any{}
-			rangeBody, err := civilRange(from, to)
-			if err != nil {
-				return nil, fmt.Errorf("invalid date range: %w", err)
-			}
-			body["range"] = rangeBody
-			raw, err := client.DailyRollUp(ctx, dt.EndpointName, body)
-			if err != nil {
-				return nil, fmt.Errorf("API error: %w", err)
-			}
-			raw["meta"] = meta
-			response = raw
-		} else if hasList {
-			filter := registry.FilterFromRange(dt, from, to)
-
-			if filter == "" && dt.ClientTimePath != "" && (from != "" || to != "") {
-				fromTime, err := clientfilter.ParseBound(from)
-				if err != nil {
-					return nil, fmt.Errorf("invalid from: %w", err)
-				}
-				toTime, err := clientfilter.ParseBound(to)
-				if err != nil {
-					return nil, fmt.Errorf("invalid to: %w", err)
-				}
-				all, err := client.ListAllDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{PageSize: 500})
-				if err != nil {
-					return nil, fmt.Errorf("API error: %w", err)
-				}
-				pts, ok := all["dataPoints"].([]any)
-				if !ok {
-					return nil, fmt.Errorf("unexpected API response: missing dataPoints")
-				}
-				filtered, skipped := clientfilter.FilterDataPoints(pts, dt.ClientTimePath, fromTime, toTime)
-				meta["unfilteredCount"] = len(pts)
-				meta["filteredCount"] = len(filtered)
-				meta["skippedCount"] = skipped
-				response = map[string]any{"dataPoints": filtered, "meta": meta}
-			} else {
-				raw, err := client.ListDataPoints(ctx, dt.EndpointName, healthapi.ListOptions{Filter: filter, PageSize: 500})
-				if err != nil {
-					return nil, fmt.Errorf("API error: %w", err)
-				}
-				nextToken, _ := raw["nextPageToken"].(string)
-				pts, _ := raw["dataPoints"].([]any)
-				meta["totalCount"] = len(pts)
-				if nextToken != "" {
-					meta["truncated"] = true
-					meta["hint"] = "narrow the date range to get the full result set"
-				}
-				raw["meta"] = meta
-				response = raw
-			}
-		} else {
-			body := map[string]any{}
-			if from != "" || to != "" {
-				rangeBody, err := civilRange(from, to)
-				if err != nil {
-					return nil, fmt.Errorf("invalid date range: %w", err)
-				}
-				body["range"] = rangeBody
-			}
-			raw, err := client.DailyRollUp(ctx, dt.EndpointName, body)
-			if err != nil {
-				return nil, fmt.Errorf("API error: %w", err)
-			}
-			raw["meta"] = meta
-			response = raw
-		}
-
-		opts := output.Options{
-			Units:   units,
-			Flatten: flatten,
-		}
-		transformed, _ := output.Transform(response, opts).(map[string]any)
-		if transformed == nil {
-			transformed = response
-		}
-		return transformed, nil
-	}
 
 	s.AddTool(getHealthDataTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args, ok := request.Params.Arguments.(map[string]any)
@@ -254,6 +286,10 @@ func main() {
 		to, _ := args["to"].(string)
 		flatten, _ := args["flatten"].(bool)
 		units, _ := args["units"].(string)
+		rollup, _ := args["rollup"].(bool)
+		pageToken, _ := args["page_token"].(string)
+		pageSizeFloat, _ := args["page_size"].(float64)
+		pageSize := int(pageSizeFloat)
 
 		dt, ok := registry.Lookup(dataType)
 		if !ok {
@@ -265,7 +301,23 @@ func main() {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to create API client: %v", err)), nil
 		}
 
-		result, err := fetchAndTransform(ctx, client, dt, from, to, flatten, units)
+		if pageToken != "" {
+			listOpts := healthapi.ListOptions{PageToken: pageToken, PageSize: 500}
+			if pageSize > 0 {
+				listOpts.PageSize = pageSize
+			}
+			raw, err := client.ListDataPoints(ctx, dt.EndpointName, listOpts)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
+			}
+			jsonBytes, err := json.Marshal(raw)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
+			}
+			return mcp.NewToolResultText(string(jsonBytes)), nil
+		}
+
+		result, err := fetchAndTransform(ctx, client, dt, from, to, flatten, units, rollup, pageSize)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -331,7 +383,8 @@ func main() {
 				data[typeName] = map[string]any{"error": "unknown data type"}
 				continue
 			}
-			result, err := fetchAndTransform(ctx, client, dt, date, date, true, units)
+			useRollup := registry.HasOperation(dt, "dailyRollUp")
+			result, err := fetchAndTransform(ctx, client, dt, date, date, true, units, useRollup, 0)
 			if err != nil {
 				data[typeName] = map[string]any{"error": err.Error()}
 				continue
