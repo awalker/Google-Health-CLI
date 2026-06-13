@@ -334,11 +334,13 @@ func main() {
 	})
 
 	dailySummaryTypes := []string{
-		"steps", "weight", "active-zone-minutes", "distance",
+		"steps", "daily-resting-heart-rate", "daily-heart-rate-variability",
+		"weight", "active-zone-minutes", "distance",
+		"daily-oxygen-saturation", "daily-respiratory-rate",
 	}
 
 	getDailySummaryTool := mcp.NewTool("get_daily_summary",
-		mcp.WithDescription("Fetches a daily health overview for a single date, returning compact rollup data for common types (steps, weight, AZM, distance). Uses dailyRollUp endpoint automatically for eligible types. Optionally specify a custom comma-separated list of types."),
+		mcp.WithDescription("Fetches a daily health overview for a single date, returning compact data for common types (steps, resting HR, HRV, weight, AZM, distance, SpO2, respiratory rate). Uses dailyRollUp for eligible types and client-side date filtering for daily types. Optionally specify a custom comma-separated list of types."),
 		mcp.WithString("date",
 			mcp.Required(),
 			mcp.Description("The date to summarize (YYYY-MM-DD)."),

@@ -118,3 +118,21 @@ func TestRollupCapableTypes(t *testing.T) {
 		}
 	}
 }
+
+func TestDailyTypesHaveClientTimePath(t *testing.T) {
+	dailyTypes := []string{
+		"daily-resting-heart-rate",
+		"daily-heart-rate-variability",
+		"daily-oxygen-saturation",
+		"daily-respiratory-rate",
+	}
+	for _, name := range dailyTypes {
+		dt, ok := Lookup(name)
+		if !ok {
+			t.Fatalf("Lookup(%q) failed", name)
+		}
+		if dt.ClientTimePath == "" {
+			t.Errorf("%s should have ClientTimePath for client-side date filtering", name)
+		}
+	}
+}
