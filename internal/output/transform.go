@@ -52,7 +52,16 @@ func flattenRollupPoint(dp map[string]any, opts Options) map[string]any {
 
 	// Flatten Steps
 	if steps, ok := dp["steps"].(map[string]any); ok {
-		result["steps"] = intVal(steps["count"])
+		result["steps"] = intVal(steps["countSum"])
+	}
+
+	// Flatten Distance
+	if dist, ok := dp["distance"].(map[string]any); ok {
+		mm := intVal(dist["millimetersSum"])
+		result["distanceKm"] = float64(mm) / 1_000_000
+		if opts.Units == "imperial" {
+			result["distanceMiles"] = float64(mm) * 0.000000621371
+		}
 	}
 
 	return result
