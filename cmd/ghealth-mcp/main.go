@@ -60,6 +60,14 @@ func civilRange(from, to string) (map[string]any, error) {
 		}
 		result["end"] = end
 	}
+	if from == to && from != "" {
+		t, err := time.Parse("2006-01-02", from)
+		if err == nil {
+			end := t.AddDate(0, 0, 1).Format("2006-01-02")
+			endDate, _ := parseCivilDate(end)
+			result["end"] = endDate
+		}
+	}
 	return result, nil
 }
 
