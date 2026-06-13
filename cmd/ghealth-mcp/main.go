@@ -268,7 +268,7 @@ func main() {
 			mcp.Description("If true, uses the dailyRollUp endpoint to return aggregated daily values instead of raw per-minute data. Recommended for multi-date queries on steps, distance, and active-zone-minutes."),
 		),
 		mcp.WithString("page_token",
-			mcp.Description("Pagination token from a previous response's nextPageToken. When set, ignores from/to and fetches the next page of raw list results."),
+			mcp.Description("Pagination token from a previous response's nextPageToken. When set, fetches the next page. Pass the same from/to values as the original query for filterable types."),
 		),
 		mcp.WithNumber("page_size",
 			mcp.Description("Number of results per page for list queries. Default 500."),
@@ -306,6 +306,9 @@ func main() {
 			if pageSize > 0 {
 				listOpts.PageSize = pageSize
 			}
+			if dt.Filterable && from != "" {
+				listOpts.Filter = registry.FilterFromRange(dt, from, to)
+			}
 			raw, err := client.ListDataPoints(ctx, dt.EndpointName, listOpts)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
@@ -331,13 +334,11 @@ func main() {
 	})
 
 	dailySummaryTypes := []string{
-		"steps", "daily-resting-heart-rate", "daily-heart-rate-variability",
-		"weight", "active-zone-minutes", "distance",
-		"daily-oxygen-saturation", "daily-respiratory-rate",
+		"steps", "weight", "active-zone-minutes", "distance",
 	}
 
 	getDailySummaryTool := mcp.NewTool("get_daily_summary",
-		mcp.WithDescription("Fetches a daily health overview for a single date, aggregating common types (steps, resting HR, HRV, weight, AZM, distance, SpO2, respiratory rate) into one compact response. Uses flattened output automatically. Optionally specify a custom comma-separated list of types."),
+		mcp.WithDescription("Fetches a daily health overview for a single date, returning compact rollup data for common types (steps, weight, AZM, distance). Uses dailyRollUp endpoint automatically for eligible types. Optionally specify a custom comma-separated list of types."),
 		mcp.WithString("date",
 			mcp.Required(),
 			mcp.Description("The date to summarize (YYYY-MM-DD)."),

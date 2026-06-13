@@ -196,6 +196,33 @@ func TestPaginationReturnsNextPageToken(t *testing.T) {
 	}
 }
 
+func TestPaginationWithFilterForFilterableTypes(t *testing.T) {
+	var receivedFilter string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedFilter = r.URL.Query().Get("filter")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"dataPoints":[{"id":"p2"}], "nextPageToken":""}`))
+	}))
+	defer srv.Close()
+
+	client := healthapi.New(srv.URL, "users/me", srv.Client())
+	dt, _ := registry.Lookup("steps")
+
+	listOpts := healthapi.ListOptions{PageToken: "token123", PageSize: 500}
+	if dt.Filterable {
+		listOpts.Filter = registry.FilterFromRange(dt, "2025-06-01", "2025-06-08")
+	}
+
+	_, err := client.ListDataPoints(context.Background(), dt.EndpointName, listOpts)
+	if err != nil {
+		t.Fatalf("ListDataPoints failed: %v", err)
+	}
+
+	if receivedFilter == "" {
+		t.Error("expected filter to be passed with pageToken for filterable type")
+	}
+}
+
 func TestDailySummaryUsesRollupForEligibleTypes(t *testing.T) {
 	rollupCalls := make(map[string]int)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
