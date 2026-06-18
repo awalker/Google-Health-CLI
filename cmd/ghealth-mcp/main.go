@@ -163,7 +163,7 @@ func extractExerciseSummary(response map[string]any) map[string]any {
 	var types []string
 	seen := map[string]bool{}
 	totalAZM := 0
-	found := false
+	workoutCount := 0
 
 	for _, dp := range dps {
 		dpMap, ok := dp.(map[string]any)
@@ -174,7 +174,7 @@ func extractExerciseSummary(response map[string]any) map[string]any {
 		if !ok {
 			continue
 		}
-		found = true
+		workoutCount++
 
 		if exType, ok := ex["exerciseType"].(string); ok && !seen[exType] {
 			seen[exType] = true
@@ -187,12 +187,12 @@ func extractExerciseSummary(response map[string]any) map[string]any {
 		}
 	}
 
-	if !found {
+	if workoutCount == 0 {
 		return nil
 	}
 
 	return map[string]any{
-		"workoutCount":       len(dps),
+		"workoutCount":       workoutCount,
 		"workoutTypes":       types,
 		"totalActiveMinutes": totalAZM,
 	}
@@ -350,16 +350,17 @@ func main() {
 		mcp.WithDescription("Returns a list of all 31 Google Health data types and their supported operations (list, rollup, serverFilter, clientFilter). Use this before querying data to avoid unsupported operations."),
 	)
 
-	s.AddTool(getCapabilitiesTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(getCapabilitiesTool, func(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		caps := registry.Capabilities()
 
-		result := "Supported Google Health Data Types Capabilities:\n\n"
+		var sb strings.Builder
+		sb.WriteString("Supported Google Health Data Types Capabilities:\n\n")
 		for _, cap := range caps {
-			result += fmt.Sprintf("- **%s**: list=%v, rollup=%v, serverFilter=%v, clientFilter=%v\n",
+			fmt.Fprintf(&sb, "- **%s**: list=%v, rollup=%v, serverFilter=%v, clientFilter=%v\n",
 				cap.Type, cap.List, cap.Rollup, cap.ServerFilter, cap.ClientFilter)
 		}
 
-		return mcp.NewToolResultText(result), nil
+		return mcp.NewToolResultText(sb.String()), nil
 	})
 
 	getHealthDataTool := mcp.NewTool("get_health_data",
@@ -464,8 +465,12 @@ func main() {
 		if !ok {
 			args = make(map[string]any)
 		}
-
 		date, _ := args["date"].(string)
+		if date != "" {
+			if _, err := time.Parse("2006-01-02", date); err != nil {
+				return mcp.NewToolResultError("date must be in YYYY-MM-DD format."), nil
+			}
+		}
 		typesParam, _ := args["types"].(string)
 		units, _ := args["units"].(string)
 
