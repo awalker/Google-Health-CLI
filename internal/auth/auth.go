@@ -178,7 +178,9 @@ func Login(ctx context.Context, cfg config.Config, opts LoginOptions) (*oauth2.T
 			return nil, err
 		}
 		cfg.Scopes = oauthCfg.Scopes
-		_ = config.Save(cfg)
+		if err := config.Save(cfg); err != nil {
+			return nil, fmt.Errorf("save config after auth: %w", err)
+		}
 		return token, nil
 	case err := <-errCh:
 		return nil, err

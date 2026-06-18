@@ -67,11 +67,14 @@ func civilRange(from, to string) (map[string]any, error) {
 	}
 	if from == to && from != "" {
 		t, err := time.Parse("2006-01-02", from)
-		if err == nil {
-			end := t.AddDate(0, 0, 1).Format("2006-01-02")
-			endDate, _ := parseCivilDate(end)
-			result["end"] = endDate
+		if err != nil {
+			return nil, fmt.Errorf("from: %w", err)
 		}
+		endDate, err := parseCivilDate(t.AddDate(0, 0, 1).Format("2006-01-02"))
+		if err != nil {
+			return nil, fmt.Errorf("computing end date: %w", err)
+		}
+		result["end"] = endDate
 	}
 	return result, nil
 }
@@ -203,14 +206,16 @@ func fetchAndTransform(ctx context.Context, client *healthapi.Client, dt registr
 		return nil, fmt.Errorf("data type %s does not support list or rollup", dt.EndpointName)
 	}
 
-	useRollup := hasRollup && (rollup || !hasList)
+	singleDateRollup := hasRollup && from != "" && from == to && !strings.Contains(from, "T")
+	useRollup := hasRollup && (rollup || singleDateRollup || !hasList)
 
 	if !useRollup {
 		if from != "" && from == to && !strings.Contains(from, "T") {
 			t, err := time.Parse("2006-01-02", from)
-			if err == nil {
-				to = t.AddDate(0, 0, 1).Format("2006-01-02")
+			if err != nil {
+				return nil, fmt.Errorf("from: invalid date: %w", err)
 			}
+			to = t.AddDate(0, 0, 1).Format("2006-01-02")
 		}
 		if !strings.Contains(from, "T") && strings.Contains(dt.DefaultTimePath, "physical_time") {
 			if from != "" {
@@ -407,6 +412,17 @@ func main() {
 		}
 		if pageSize > maxPageSize {
 			return mcp.NewToolResultError(fmt.Sprintf("page_size must not exceed %d.", maxPageSize)), nil
+		}
+
+		if from != "" && !strings.Contains(from, "T") {
+			if _, err := time.Parse("2006-01-02", from); err != nil {
+				return mcp.NewToolResultError("from must be YYYY-MM-DD or a datetime string containing 'T'."), nil
+			}
+		}
+		if to != "" && !strings.Contains(to, "T") {
+			if _, err := time.Parse("2006-01-02", to); err != nil {
+				return mcp.NewToolResultError("to must be YYYY-MM-DD or a datetime string containing 'T'."), nil
+			}
 		}
 
 		dt, ok := registry.Lookup(dataType)
