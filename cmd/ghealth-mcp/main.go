@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,6 +85,108 @@ func parseCivilDate(s string) (map[string]any, error) {
 			"day":   t.Day(),
 		},
 	}, nil
+}
+
+func extractSleepSummary(response map[string]any) map[string]any {
+	dps, _ := response["dataPoints"].([]any)
+	if len(dps) == 0 {
+		return nil
+	}
+
+	var sleepMap map[string]any
+	for _, dp := range dps {
+		dpMap, ok := dp.(map[string]any)
+		if !ok {
+			continue
+		}
+		sleep, ok := dpMap["sleep"].(map[string]any)
+		if !ok {
+			continue
+		}
+		sleepMap = sleep
+		if t, _ := sleep["type"].(string); t == "STAGES" {
+			break
+		}
+	}
+
+	if sleepMap == nil {
+		return nil
+	}
+
+	summary, ok := sleepMap["summary"].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	result := make(map[string]any)
+	if v, err := strconv.Atoi(fmt.Sprint(summary["minutesAsleep"])); err == nil {
+		result["minutesAsleep"] = v
+	}
+
+	if stages, ok := summary["stagesSummary"].([]any); ok {
+		for _, s := range stages {
+			stage, ok := s.(map[string]any)
+			if !ok {
+				continue
+			}
+			stype, _ := stage["type"].(string)
+			minutes, _ := strconv.Atoi(fmt.Sprint(stage["minutes"]))
+			switch stype {
+			case "DEEP":
+				result["deepMinutes"] = minutes
+			case "REM":
+				result["remMinutes"] = minutes
+			case "LIGHT":
+				result["lightMinutes"] = minutes
+			}
+		}
+	}
+
+	return result
+}
+
+func extractExerciseSummary(response map[string]any) map[string]any {
+	dps, _ := response["dataPoints"].([]any)
+	if len(dps) == 0 {
+		return nil
+	}
+
+	var types []string
+	seen := map[string]bool{}
+	totalAZM := 0
+	found := false
+
+	for _, dp := range dps {
+		dpMap, ok := dp.(map[string]any)
+		if !ok {
+			continue
+		}
+		ex, ok := dpMap["exercise"].(map[string]any)
+		if !ok {
+			continue
+		}
+		found = true
+
+		if exType, ok := ex["exerciseType"].(string); ok && !seen[exType] {
+			seen[exType] = true
+			types = append(types, exType)
+		}
+
+		if ms, ok := ex["metricsSummary"].(map[string]any); ok {
+			n, _ := strconv.Atoi(fmt.Sprint(ms["activeZoneMinutes"]))
+			totalAZM += n
+		}
+	}
+
+	if !found {
+		return nil
+	}
+
+	return map[string]any{
+		"workoutCount":       len(dps),
+		"workoutTypes":       types,
+		"totalActiveMinutes": totalAZM,
+	}
 }
 
 // fetchAndTransform fetches data for a single type and returns the
@@ -337,10 +440,11 @@ func main() {
 		"steps", "daily-resting-heart-rate", "daily-heart-rate-variability",
 		"weight", "active-zone-minutes", "distance",
 		"daily-oxygen-saturation", "daily-respiratory-rate",
+		"sleep", "exercise",
 	}
 
 	getDailySummaryTool := mcp.NewTool("get_daily_summary",
-		mcp.WithDescription("Fetches a daily health overview for a single date, returning compact data for common types (steps, resting HR, HRV, weight, AZM, distance, SpO2, respiratory rate). Uses dailyRollUp for eligible types and client-side date filtering for daily types. Optionally specify a custom comma-separated list of types."),
+		mcp.WithDescription("Fetches a daily health overview for a single date, returning compact summaries for key metrics (steps, resting HR, HRV, weight, AZM, distance, SpO2, respiratory rate) plus sleep stage breakdown and exercise count/types. Sleep/exercise fields are null when no data exists for the date. Uses dailyRollUp for eligible types and client-side date filtering for daily types. Optionally specify a custom comma-separated list of types."),
 		mcp.WithString("date",
 			mcp.Required(),
 			mcp.Description("The date to summarize (YYYY-MM-DD)."),
@@ -393,6 +497,17 @@ func main() {
 				continue
 			}
 			data[typeName] = result
+		}
+
+		if sleepResult, ok := data["sleep"].(map[string]any); ok {
+			if _, isError := sleepResult["error"]; !isError {
+				data["sleep"] = extractSleepSummary(sleepResult)
+			}
+		}
+		if exerciseResult, ok := data["exercise"].(map[string]any); ok {
+			if _, isError := exerciseResult["error"]; !isError {
+				data["exercise"] = extractExerciseSummary(exerciseResult)
+			}
 		}
 
 		response := map[string]any{"date": date, "data": data}

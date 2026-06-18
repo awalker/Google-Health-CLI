@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -317,4 +318,230 @@ func extractParamNames(tool *mcp.Tool) []string {
 		}
 	}
 	return names
+}
+
+func TestExtractSleepSummaryStages(t *testing.T) {
+	response := map[string]any{
+		"dataPoints": []any{
+			map[string]any{
+				"sleep": map[string]any{
+					"type": "STAGES",
+					"summary": map[string]any{
+						"minutesAsleep": "435",
+						"minutesAwake":  "5",
+						"stagesSummary": []any{
+							map[string]any{"type": "AWAKE", "minutes": "5", "count": "1"},
+							map[string]any{"type": "LIGHT", "minutes": "201", "count": "13"},
+							map[string]any{"type": "DEEP", "minutes": "96", "count": "6"},
+							map[string]any{"type": "REM", "minutes": "137", "count": "7"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	result := extractSleepSummary(response)
+	if result == nil {
+		t.Fatal("expected non-nil sleep summary")
+	}
+	if got, want := result["minutesAsleep"], 435; got != want {
+		t.Errorf("minutesAsleep = %v, want %v", got, want)
+	}
+	if got, want := result["deepMinutes"], 96; got != want {
+		t.Errorf("deepMinutes = %v, want %v", got, want)
+	}
+	if got, want := result["remMinutes"], 137; got != want {
+		t.Errorf("remMinutes = %v, want %v", got, want)
+	}
+	if got, want := result["lightMinutes"], 201; got != want {
+		t.Errorf("lightMinutes = %v, want %v", got, want)
+	}
+}
+
+func TestExtractSleepSummaryPrefersStages(t *testing.T) {
+	response := map[string]any{
+		"dataPoints": []any{
+			map[string]any{
+				"sleep": map[string]any{
+					"type": "CLASSIC",
+					"summary": map[string]any{
+						"minutesAsleep": "400",
+					},
+				},
+			},
+			map[string]any{
+				"sleep": map[string]any{
+					"type": "STAGES",
+					"summary": map[string]any{
+						"minutesAsleep": "435",
+						"stagesSummary": []any{
+							map[string]any{"type": "DEEP", "minutes": "96"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	result := extractSleepSummary(response)
+	if result == nil {
+		t.Fatal("expected non-nil sleep summary")
+	}
+	if got, want := result["minutesAsleep"], 435; got != want {
+		t.Errorf("should prefer STAGES sleep: minutesAsleep = %v, want %v", got, want)
+	}
+}
+
+func TestExtractSleepSummaryEmpty(t *testing.T) {
+	tests := []struct {
+		name     string
+		response map[string]any
+	}{
+		{"no dataPoints", map[string]any{"dataPoints": []any{}}},
+		{"no sleep field", map[string]any{"dataPoints": []any{map[string]any{"other": true}}}},
+		{"no summary", map[string]any{"dataPoints": []any{map[string]any{"sleep": map[string]any{"type": "STAGES"}}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractSleepSummary(tt.response); got != nil {
+				t.Errorf("expected nil for %q, got %v", tt.name, got)
+			}
+		})
+	}
+}
+
+func TestExtractExerciseSummary(t *testing.T) {
+	response := map[string]any{
+		"dataPoints": []any{
+			map[string]any{
+				"exercise": map[string]any{
+					"exerciseType": "BIKING",
+					"metricsSummary": map[string]any{
+						"activeZoneMinutes": "14",
+					},
+				},
+			},
+			map[string]any{
+				"exercise": map[string]any{
+					"exerciseType": "WALKING",
+					"metricsSummary": map[string]any{
+						"activeZoneMinutes": "19",
+					},
+				},
+			},
+		},
+	}
+
+	result := extractExerciseSummary(response)
+	if result == nil {
+		t.Fatal("expected non-nil exercise summary")
+	}
+	if got, want := result["workoutCount"], 2; got != want {
+		t.Errorf("workoutCount = %v, want %v", got, want)
+	}
+	types, _ := result["workoutTypes"].([]string)
+	if len(types) != 2 {
+		t.Errorf("workoutTypes length = %d, want 2", len(types))
+	}
+	if got, want := result["totalActiveMinutes"], 33; got != want {
+		t.Errorf("totalActiveMinutes = %v, want %v", got, want)
+	}
+}
+
+func TestExtractExerciseSummaryDeduplicatesTypes(t *testing.T) {
+	response := map[string]any{
+		"dataPoints": []any{
+			map[string]any{
+				"exercise": map[string]any{
+					"exerciseType": "BIKING",
+					"metricsSummary": map[string]any{
+						"activeZoneMinutes": "10",
+					},
+				},
+			},
+			map[string]any{
+				"exercise": map[string]any{
+					"exerciseType": "BIKING",
+					"metricsSummary": map[string]any{
+						"activeZoneMinutes": "20",
+					},
+				},
+			},
+		},
+	}
+
+	result := extractExerciseSummary(response)
+	if result == nil {
+		t.Fatal("expected non-nil exercise summary")
+	}
+	types, _ := result["workoutTypes"].([]string)
+	if len(types) != 1 {
+		t.Errorf("workoutTypes length = %d, want 1", len(types))
+	}
+	if got, want := result["totalActiveMinutes"], 30; got != want {
+		t.Errorf("totalActiveMinutes = %v, want %v", got, want)
+	}
+}
+
+func TestExtractExerciseSummaryEmpty(t *testing.T) {
+	if got := extractExerciseSummary(map[string]any{"dataPoints": []any{}}); got != nil {
+		t.Errorf("expected nil for empty dataPoints, got %v", got)
+	}
+	if got := extractExerciseSummary(map[string]any{"dataPoints": []any{map[string]any{"other": true}}}); got != nil {
+		t.Errorf("expected nil for no exercise field, got %v", got)
+	}
+}
+
+func TestDailySummaryReturnsSleepAndExercise(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "sleep"):
+			w.Write([]byte(`{"dataPoints":[{"sleep":{"interval":{"startTime":"2025-06-13T07:00:00Z"},"type":"STAGES","summary":{"minutesAsleep":"435","stagesSummary":[{"type":"DEEP","minutes":"96"},{"type":"REM","minutes":"137"},{"type":"LIGHT","minutes":"201"}]}}}]}`))
+		case strings.Contains(r.URL.Path, "exercise"):
+			w.Write([]byte(`{"dataPoints":[{"exercise":{"interval":{"startTime":"2025-06-13T14:00:00Z"},"exerciseType":"WALKING","metricsSummary":{"activeZoneMinutes":"19"}}}]}`))
+		default:
+			w.Write([]byte(`{"rollUpDataPoints":[]}`))
+		}
+	}))
+	defer srv.Close()
+
+	client := healthapi.New(srv.URL, "users/me", srv.Client())
+
+	sleepSummary := extractDailySummarySleep(t, client, "sleep")
+	if sleepSummary == nil {
+		t.Fatal("extracted sleep summary is nil")
+	}
+	if got, want := sleepSummary["minutesAsleep"], 435; got != want {
+		t.Errorf("minutesAsleep = %v, want %v", got, want)
+	}
+
+	exerciseSummary := extractDailySummaryExercise(t, client, "exercise")
+	if exerciseSummary == nil {
+		t.Fatal("extracted exercise summary is nil")
+	}
+	if got, want := exerciseSummary["workoutCount"], 1; got != want {
+		t.Errorf("workoutCount = %v, want %v", got, want)
+	}
+}
+
+func extractDailySummarySleep(t *testing.T, client *healthapi.Client, typeName string) map[string]any {
+	t.Helper()
+	dt, _ := registry.Lookup(typeName)
+	result, err := fetchAndTransform(context.Background(), client, dt, "2025-06-13", "2025-06-13", true, "", false, 0)
+	if err != nil {
+		t.Fatalf("fetchAndTransform(%s) failed: %v", typeName, err)
+	}
+	return extractSleepSummary(result)
+}
+
+func extractDailySummaryExercise(t *testing.T, client *healthapi.Client, typeName string) map[string]any {
+	t.Helper()
+	dt, _ := registry.Lookup(typeName)
+	result, err := fetchAndTransform(context.Background(), client, dt, "2025-06-13", "2025-06-13", true, "", false, 0)
+	if err != nil {
+		t.Fatalf("fetchAndTransform(%s) failed: %v", typeName, err)
+	}
+	return extractExerciseSummary(result)
 }
