@@ -1,7 +1,7 @@
 .DS_Store
 /ghealth
+/ghealth-mcp
 /dist/
 /coverage.out
 opencode.json
-ghealth-mcp
 ghealth-mcp-bugs.md
