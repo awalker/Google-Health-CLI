@@ -64,6 +64,16 @@ func flattenRollupPoint(dp map[string]any, opts Options) map[string]any {
 		}
 	}
 
+	// Flatten Weight
+	if wt, ok := dp["weight"].(map[string]any); ok {
+		if g, ok := wt["weightGramsAvg"].(float64); ok {
+			result["weightKg"] = g / 1000
+			if opts.Units == "imperial" {
+				result["weightLbs"] = g * 0.00220462
+			}
+		}
+	}
+
 	return result
 }
 
