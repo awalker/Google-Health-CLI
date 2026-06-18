@@ -66,7 +66,8 @@ func flattenRollupPoint(dp map[string]any, opts Options) map[string]any {
 
 	// Flatten Weight
 	if wt, ok := dp["weight"].(map[string]any); ok {
-		if g, ok := wt["weightGramsAvg"].(float64); ok {
+		if _, exists := wt["weightGramsAvg"]; exists {
+			g := floatVal(wt["weightGramsAvg"])
 			result["weightKg"] = g / 1000
 			if opts.Units == "imperial" {
 				result["weightLbs"] = g * 0.00220462
@@ -81,8 +82,8 @@ func transformDataPoint(dp map[string]any, opts Options) map[string]any {
 	if opts.Units == "imperial" {
 		// Convert weight
 		if weight, ok := dp["weight"].(map[string]any); ok {
-			if g, ok := weight["weightGrams"].(float64); ok {
-				weight["weightLbs"] = g * 0.00220462
+			if _, exists := weight["weightGrams"]; exists {
+				weight["weightLbs"] = floatVal(weight["weightGrams"]) * 0.00220462
 			}
 		}
 		// Convert distance
@@ -117,6 +118,20 @@ func intVal(v any) int {
 		var i int
 		fmt.Sscanf(n, "%d", &i)
 		return i
+	}
+	return 0
+}
+
+func floatVal(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case string:
+		var f float64
+		fmt.Sscanf(n, "%f", &f)
+		return f
 	}
 	return 0
 }

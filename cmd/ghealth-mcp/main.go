@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -44,12 +44,7 @@ func newHealthClient(ctx context.Context) (*healthapi.Client, error) {
 		return nil, fmt.Errorf("authentication failed")
 	}
 
-	httpClient := oauth2.NewClient(ctx, source)
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
-
-	return healthapi.New(cfg.BaseURL, cfg.User, httpClient), nil
+	return healthapi.New(cfg.BaseURL, cfg.User, oauth2.NewClient(ctx, source)), nil
 }
 
 // civilRange builds a daily rollup range body from date-only strings,
@@ -208,21 +203,22 @@ func fetchAndTransform(ctx context.Context, client *healthapi.Client, dt registr
 		return nil, fmt.Errorf("data type %s does not support list or rollup", dt.EndpointName)
 	}
 
-	singleDateRollup := hasRollup && from != "" && from == to && !strings.Contains(from, "T")
+	useRollup := hasRollup && (rollup || !hasList)
 
-	if !singleDateRollup && from != "" && from == to && !strings.Contains(from, "T") {
-		t, err := time.Parse("2006-01-02", from)
-		if err == nil {
-			to = t.AddDate(0, 0, 1).Format("2006-01-02")
+	if !useRollup {
+		if from != "" && from == to && !strings.Contains(from, "T") {
+			t, err := time.Parse("2006-01-02", from)
+			if err == nil {
+				to = t.AddDate(0, 0, 1).Format("2006-01-02")
+			}
 		}
-	}
-
-	if !singleDateRollup && !strings.Contains(from, "T") && strings.Contains(dt.DefaultTimePath, "physical_time") {
-		if from != "" {
-			from += "T00:00:00Z"
-		}
-		if to != "" && !strings.Contains(to, "T") {
-			to += "T00:00:00Z"
+		if !strings.Contains(from, "T") && strings.Contains(dt.DefaultTimePath, "physical_time") {
+			if from != "" {
+				from += "T00:00:00Z"
+			}
+			if to != "" && !strings.Contains(to, "T") {
+				to += "T00:00:00Z"
+			}
 		}
 	}
 
@@ -230,8 +226,6 @@ func fetchAndTransform(ctx context.Context, client *healthapi.Client, dt registr
 		"timezoneNote": "all timestamps are in UTC (Z suffix)",
 	}
 	var response map[string]any
-
-	useRollup := hasRollup && (rollup || singleDateRollup || !hasList)
 
 	if useRollup {
 		body := map[string]any{}
@@ -266,6 +260,7 @@ func fetchAndTransform(ctx context.Context, client *healthapi.Client, dt registr
 			meta["totalCount"] = len(pts)
 			if nextToken != "" {
 				meta["hasMore"] = true
+				meta["nextPageToken"] = nextToken
 			}
 			raw["meta"] = meta
 			opts := output.Options{
@@ -320,8 +315,8 @@ func fetchAndTransform(ctx context.Context, client *healthapi.Client, dt registr
 			pts, _ := raw["dataPoints"].([]any)
 			meta["totalCount"] = len(pts)
 			if nextToken != "" {
-				meta["truncated"] = true
-				meta["hint"] = "narrow the date range to get the full result set"
+				meta["hasMore"] = true
+				meta["nextPageToken"] = nextToken
 			}
 			raw["meta"] = meta
 			response = raw
@@ -466,10 +461,8 @@ func main() {
 			args = make(map[string]any)
 		}
 		date, _ := args["date"].(string)
-		if date != "" {
-			if _, err := time.Parse("2006-01-02", date); err != nil {
-				return mcp.NewToolResultError("date must be in YYYY-MM-DD format."), nil
-			}
+		if _, err := time.Parse("2006-01-02", date); err != nil {
+			return mcp.NewToolResultError("date must be in YYYY-MM-DD format."), nil
 		}
 		typesParam, _ := args["types"].(string)
 		units, _ := args["units"].(string)
@@ -501,21 +494,34 @@ func main() {
 		}
 
 		data := make(map[string]any, len(typesToFetch))
+		var mu sync.Mutex
+		var wg sync.WaitGroup
 		for _, typeName := range typesToFetch {
-			dt, ok := registry.Lookup(typeName)
-			if !ok {
-				data[typeName] = map[string]any{"error": "unknown data type"}
-				continue
-			}
-			useRollup := registry.HasOperation(dt, "dailyRollUp")
-			result, err := fetchAndTransform(summaryCtx, client, dt, date, date, true, units, useRollup, 0, "")
-			if err != nil {
-				log.Printf("ghealth-mcp: get_daily_summary error for %s: %v", typeName, err)
-				data[typeName] = map[string]any{"error": "failed to fetch data"}
-				continue
-			}
-			data[typeName] = result
+			wg.Add(1)
+			go func(typeName string) {
+				defer wg.Done()
+				dt, ok := registry.Lookup(typeName)
+				if !ok {
+					mu.Lock()
+					data[typeName] = map[string]any{"error": "unknown data type"}
+					mu.Unlock()
+					return
+				}
+				useRollup := registry.HasOperation(dt, "dailyRollUp")
+				result, err := fetchAndTransform(summaryCtx, client, dt, date, date, true, units, useRollup, 0, "")
+				if err != nil {
+					log.Printf("ghealth-mcp: get_daily_summary error for %s: %v", typeName, err)
+					mu.Lock()
+					data[typeName] = map[string]any{"error": "failed to fetch data"}
+					mu.Unlock()
+					return
+				}
+				mu.Lock()
+				data[typeName] = result
+				mu.Unlock()
+			}(typeName)
 		}
+		wg.Wait()
 
 		if sleepResult, ok := data["sleep"].(map[string]any); ok {
 			if _, isError := sleepResult["error"]; !isError {

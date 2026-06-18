@@ -104,6 +104,28 @@ func TestFlattenRollupPointHandlesWeight(t *testing.T) {
 			t.Fatal("weightLbs should not be present when weight field is missing")
 		}
 	})
+
+	t.Run("weightGramsAvg as int", func(t *testing.T) {
+		dpInt := map[string]any{
+			"civilStartTime": map[string]any{
+				"date": map[string]any{
+					"year": float64(2026), "month": float64(6), "day": float64(18),
+				},
+			},
+			"weight": map[string]any{
+				"weightGramsAvg": 91943,
+			},
+		}
+		result := flattenRollupPoint(dpInt, Options{Units: "metric"})
+		gotKg, ok := result["weightKg"].(float64)
+		if !ok {
+			t.Fatalf("weightKg missing or wrong type: %T", result["weightKg"])
+		}
+		wantKg := 91943.0 / 1000
+		if math.Abs(gotKg-wantKg) > 0.001 {
+			t.Fatalf("weightKg = %v, want %v", gotKg, wantKg)
+		}
+	})
 }
 
 func TestTransformRollupPreservesWeight(t *testing.T) {
