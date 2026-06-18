@@ -22,20 +22,29 @@ import (
 	"github.com/rudrankriyam/Google-Health-CLI/internal/registry"
 )
 
+const (
+	maxPageSize         = 1000
+	maxTypesCount       = 20
+	maxTypesParamLen    = 500
+	dailySummaryTimeout = 60 * time.Second
+)
+
 // newHealthClient loads the local config, creates an OAuth token source,
 // and returns an authenticated healthapi.Client.
-func newHealthClient() (*healthapi.Client, error) {
+func newHealthClient(ctx context.Context) (*healthapi.Client, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load config: %w", err)
+		log.Printf("ghealth-mcp: failed to load config: %v", err)
+		return nil, fmt.Errorf("failed to load configuration")
 	}
 
-	source, err := auth.TokenSource(context.Background(), cfg)
+	source, err := auth.TokenSource(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("authentication error: %w", err)
+		log.Printf("ghealth-mcp: authentication error: %v", err)
+		return nil, fmt.Errorf("authentication failed")
 	}
 
-	httpClient := oauth2.NewClient(context.Background(), source)
+	httpClient := oauth2.NewClient(ctx, source)
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
@@ -191,7 +200,7 @@ func extractExerciseSummary(response map[string]any) map[string]any {
 
 // fetchAndTransform fetches data for a single type and returns the
 // transformed response map, or an error message string (empty on success).
-func fetchAndTransform(ctx context.Context, client *healthapi.Client, dt registry.DataType, from, to string, flatten bool, units string, rollup bool, pageSize int) (map[string]any, error) {
+func fetchAndTransform(ctx context.Context, client *healthapi.Client, dt registry.DataType, from, to string, flatten bool, units string, rollup bool, pageSize int, pageToken string) (map[string]any, error) {
 	hasList := registry.HasOperation(dt, "list")
 	hasRollup := registry.HasOperation(dt, "dailyRollUp")
 
@@ -222,7 +231,9 @@ func fetchAndTransform(ctx context.Context, client *healthapi.Client, dt registr
 	}
 	var response map[string]any
 
-	if rollup && hasRollup {
+	useRollup := hasRollup && (rollup || singleDateRollup || !hasList)
+
+	if useRollup {
 		body := map[string]any{}
 		if from != "" || to != "" {
 			rangeBody, err := civilRange(from, to)
@@ -237,20 +248,37 @@ func fetchAndTransform(ctx context.Context, client *healthapi.Client, dt registr
 		}
 		raw["meta"] = meta
 		response = raw
-	} else if singleDateRollup {
-		body := map[string]any{}
-		rangeBody, err := civilRange(from, to)
-		if err != nil {
-			return nil, fmt.Errorf("invalid date range: %w", err)
-		}
-		body["range"] = rangeBody
-		raw, err := client.DailyRollUp(ctx, dt.EndpointName, body)
-		if err != nil {
-			return nil, fmt.Errorf("API error: %w", err)
-		}
-		raw["meta"] = meta
-		response = raw
 	} else if hasList {
+		if pageToken != "" {
+			listOpts := healthapi.ListOptions{PageToken: pageToken, PageSize: 500}
+			if pageSize > 0 {
+				listOpts.PageSize = pageSize
+			}
+			if dt.Filterable && from != "" {
+				listOpts.Filter = registry.FilterFromRange(dt, from, to)
+			}
+			raw, err := client.ListDataPoints(ctx, dt.EndpointName, listOpts)
+			if err != nil {
+				return nil, fmt.Errorf("API error: %w", err)
+			}
+			nextToken, _ := raw["nextPageToken"].(string)
+			pts, _ := raw["dataPoints"].([]any)
+			meta["totalCount"] = len(pts)
+			if nextToken != "" {
+				meta["hasMore"] = true
+			}
+			raw["meta"] = meta
+			opts := output.Options{
+				Units:   units,
+				Flatten: flatten,
+			}
+			transformed, _ := output.Transform(raw, opts).(map[string]any)
+			if transformed == nil {
+				transformed = raw
+			}
+			return transformed, nil
+		}
+
 		filter := registry.FilterFromRange(dt, from, to)
 
 		if filter == "" && dt.ClientTimePath != "" && (from != "" || to != "") {
@@ -298,21 +326,6 @@ func fetchAndTransform(ctx context.Context, client *healthapi.Client, dt registr
 			raw["meta"] = meta
 			response = raw
 		}
-	} else {
-		body := map[string]any{}
-		if from != "" || to != "" {
-			rangeBody, err := civilRange(from, to)
-			if err != nil {
-				return nil, fmt.Errorf("invalid date range: %w", err)
-			}
-			body["range"] = rangeBody
-		}
-		raw, err := client.DailyRollUp(ctx, dt.EndpointName, body)
-		if err != nil {
-			return nil, fmt.Errorf("API error: %w", err)
-		}
-		raw["meta"] = meta
-		response = raw
 	}
 
 	opts := output.Options{
@@ -393,44 +406,33 @@ func main() {
 		pageToken, _ := args["page_token"].(string)
 		pageSizeFloat, _ := args["page_size"].(float64)
 		pageSize := int(pageSizeFloat)
+		if pageSize < 0 {
+			return mcp.NewToolResultError("page_size must be a positive number."), nil
+		}
+		if pageSize > maxPageSize {
+			return mcp.NewToolResultError(fmt.Sprintf("page_size must not exceed %d.", maxPageSize)), nil
+		}
 
 		dt, ok := registry.Lookup(dataType)
 		if !ok {
 			return mcp.NewToolResultError(fmt.Sprintf("Unknown data type: %s. Run get_health_capabilities to see valid types.", dataType)), nil
 		}
 
-		client, err := newHealthClient()
+		client, err := newHealthClient(ctx)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to create API client: %v", err)), nil
+			return mcp.NewToolResultError("Failed to initialize API client."), nil
 		}
 
-		if pageToken != "" {
-			listOpts := healthapi.ListOptions{PageToken: pageToken, PageSize: 500}
-			if pageSize > 0 {
-				listOpts.PageSize = pageSize
-			}
-			if dt.Filterable && from != "" {
-				listOpts.Filter = registry.FilterFromRange(dt, from, to)
-			}
-			raw, err := client.ListDataPoints(ctx, dt.EndpointName, listOpts)
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("API error: %v", err)), nil
-			}
-			jsonBytes, err := json.Marshal(raw)
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
-			}
-			return mcp.NewToolResultText(string(jsonBytes)), nil
-		}
-
-		result, err := fetchAndTransform(ctx, client, dt, from, to, flatten, units, rollup, pageSize)
+		result, err := fetchAndTransform(ctx, client, dt, from, to, flatten, units, rollup, pageSize, pageToken)
 		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
+			log.Printf("ghealth-mcp: get_health_data fetchAndTransform error: %v", err)
+			return mcp.NewToolResultError("Failed to process health data."), nil
 		}
 
 		jsonBytes, err := json.Marshal(result)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
+			log.Printf("ghealth-mcp: get_health_data serialization error: %v", err)
+			return mcp.NewToolResultError("Failed to serialize API response."), nil
 		}
 
 		return mcp.NewToolResultText(string(jsonBytes)), nil
@@ -467,14 +469,24 @@ func main() {
 		typesParam, _ := args["types"].(string)
 		units, _ := args["units"].(string)
 
-		client, err := newHealthClient()
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to create API client: %v", err)), nil
+		if len(typesParam) > maxTypesParamLen {
+			return mcp.NewToolResultError(fmt.Sprintf("types parameter must not exceed %d characters.", maxTypesParamLen)), nil
 		}
+
+		client, err := newHealthClient(ctx)
+		if err != nil {
+			return mcp.NewToolResultError("Failed to initialize API client."), nil
+		}
+
+		summaryCtx, cancel := context.WithTimeout(ctx, dailySummaryTimeout)
+		defer cancel()
 
 		typesToFetch := dailySummaryTypes
 		if typesParam != "" {
 			parts := strings.Split(typesParam, ",")
+			if len(parts) > maxTypesCount {
+				return mcp.NewToolResultError(fmt.Sprintf("types parameter must not contain more than %d types.", maxTypesCount)), nil
+			}
 			typesToFetch = make([]string, 0, len(parts))
 			for _, p := range parts {
 				if trimmed := strings.TrimSpace(p); trimmed != "" {
@@ -491,9 +503,10 @@ func main() {
 				continue
 			}
 			useRollup := registry.HasOperation(dt, "dailyRollUp")
-			result, err := fetchAndTransform(ctx, client, dt, date, date, true, units, useRollup, 0)
+			result, err := fetchAndTransform(summaryCtx, client, dt, date, date, true, units, useRollup, 0, "")
 			if err != nil {
-				data[typeName] = map[string]any{"error": err.Error()}
+				log.Printf("ghealth-mcp: get_daily_summary error for %s: %v", typeName, err)
+				data[typeName] = map[string]any{"error": "failed to fetch data"}
 				continue
 			}
 			data[typeName] = result
@@ -513,7 +526,8 @@ func main() {
 		response := map[string]any{"date": date, "data": data}
 		jsonBytes, err := json.Marshal(response)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
+			log.Printf("ghealth-mcp: get_daily_summary serialization error: %v", err)
+			return mcp.NewToolResultError("Failed to serialize API response."), nil
 		}
 
 		return mcp.NewToolResultText(string(jsonBytes)), nil

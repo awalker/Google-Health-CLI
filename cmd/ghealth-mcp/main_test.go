@@ -93,7 +93,7 @@ func TestFetchAndTransformUsesRollupWhenRequested(t *testing.T) {
 	client := healthapi.New(srv.URL, "users/me", srv.Client())
 	dt, _ := registry.Lookup("steps")
 
-	_, err := fetchAndTransform(context.Background(), client, dt, "2025-06-01", "2025-06-07", false, "", true, 0)
+	_, err := fetchAndTransform(context.Background(), client, dt, "2025-06-01", "2025-06-07", false, "", true, 0, "")
 	if err != nil {
 		t.Fatalf("fetchAndTransform failed: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestFetchAndTransformUsesListWhenRollupFalse(t *testing.T) {
 	client := healthapi.New(srv.URL, "users/me", srv.Client())
 	dt, _ := registry.Lookup("steps")
 
-	_, err := fetchAndTransform(context.Background(), client, dt, "2025-06-01", "2025-06-07", false, "", false, 0)
+	_, err := fetchAndTransform(context.Background(), client, dt, "2025-06-01", "2025-06-07", false, "", false, 0, "")
 	if err != nil {
 		t.Fatalf("fetchAndTransform failed: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestFetchAndTransformSingleDateRollup(t *testing.T) {
 	client := healthapi.New(srv.URL, "users/me", srv.Client())
 	dt, _ := registry.Lookup("steps")
 
-	_, err := fetchAndTransform(context.Background(), client, dt, "2025-06-13", "2025-06-13", false, "", false, 0)
+	_, err := fetchAndTransform(context.Background(), client, dt, "2025-06-13", "2025-06-13", false, "", false, 0, "")
 	if err != nil {
 		t.Fatalf("fetchAndTransform failed: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestDailySummaryUsesRollupForEligibleTypes(t *testing.T) {
 			t.Fatalf("Lookup(%q) failed", typeName)
 		}
 		useRollup := registry.HasOperation(dt, "dailyRollUp")
-		_, err := fetchAndTransform(context.Background(), client, dt, date, date, true, "", useRollup, 0)
+		_, err := fetchAndTransform(context.Background(), client, dt, date, date, true, "", useRollup, 0, "")
 		if err != nil {
 			t.Fatalf("fetchAndTransform(%s) failed: %v", typeName, err)
 		}
@@ -529,7 +529,7 @@ func TestDailySummaryReturnsSleepAndExercise(t *testing.T) {
 func extractDailySummarySleep(t *testing.T, client *healthapi.Client, typeName string) map[string]any {
 	t.Helper()
 	dt, _ := registry.Lookup(typeName)
-	result, err := fetchAndTransform(context.Background(), client, dt, "2025-06-13", "2025-06-13", true, "", false, 0)
+	result, err := fetchAndTransform(context.Background(), client, dt, "2025-06-13", "2025-06-13", true, "", false, 0, "")
 	if err != nil {
 		t.Fatalf("fetchAndTransform(%s) failed: %v", typeName, err)
 	}
@@ -539,7 +539,7 @@ func extractDailySummarySleep(t *testing.T, client *healthapi.Client, typeName s
 func extractDailySummaryExercise(t *testing.T, client *healthapi.Client, typeName string) map[string]any {
 	t.Helper()
 	dt, _ := registry.Lookup(typeName)
-	result, err := fetchAndTransform(context.Background(), client, dt, "2025-06-13", "2025-06-13", true, "", false, 0)
+	result, err := fetchAndTransform(context.Background(), client, dt, "2025-06-13", "2025-06-13", true, "", false, 0, "")
 	if err != nil {
 		t.Fatalf("fetchAndTransform(%s) failed: %v", typeName, err)
 	}
