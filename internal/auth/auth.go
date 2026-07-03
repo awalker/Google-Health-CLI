@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -170,6 +169,21 @@ func Login(ctx context.Context, cfg config.Config, opts LoginOptions) (*oauth2.T
 
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
+	// Sends are non-blocking so duplicate callback hits (e.g. a browser
+	// re-requesting the redirect URL) can never block the HTTP handler;
+	// only the first result is consumed.
+	sendCode := func(code string) {
+		select {
+		case codeCh <- code:
+		default:
+		}
+	}
+	sendErr := func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
 	mux := http.NewServeMux()
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	listener, err := net.Listen("tcp", redirect.Host)
@@ -179,29 +193,33 @@ func Login(ctx context.Context, cfg config.Config, opts LoginOptions) (*oauth2.T
 	mux.HandleFunc(redirect.Path, func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("state"); got != state {
 			http.Error(w, "state mismatch", http.StatusBadRequest)
-			errCh <- errors.New("OAuth state mismatch")
+			sendErr(errors.New("OAuth state mismatch"))
 			return
 		}
 		if value := r.URL.Query().Get("error"); value != "" {
 			http.Error(w, value, http.StatusBadRequest)
-			errCh <- fmt.Errorf("OAuth error: %s", value)
+			sendErr(fmt.Errorf("OAuth error: %s", value))
 			return
 		}
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			http.Error(w, "missing code", http.StatusBadRequest)
-			errCh <- errors.New("OAuth callback did not include a code")
+			sendErr(errors.New("OAuth callback did not include a code"))
 			return
 		}
 		fmt.Fprintln(w, "ghealth login complete. You can close this tab.")
-		codeCh <- code
+		sendCode(code)
 	})
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+			sendErr(err)
 		}
 	}()
-	defer server.Shutdown(context.Background())
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
 
 	authURL := oauthCfg.AuthCodeURL(
 		state,
@@ -229,7 +247,9 @@ func Login(ctx context.Context, cfg config.Config, opts LoginOptions) (*oauth2.T
 			return nil, err
 		}
 		cfg.Scopes = oauthCfg.Scopes
-		_ = config.Save(cfg)
+		if err := config.Save(cfg); err != nil {
+			return nil, fmt.Errorf("login succeeded but saving config failed: %w", err)
+		}
 		return token, nil
 	case err := <-errCh:
 		return nil, err
@@ -240,34 +260,12 @@ func Login(ctx context.Context, cfg config.Config, opts LoginOptions) (*oauth2.T
 	}
 }
 
-func AuthURL(cfg config.Config, scopes []string) (string, error) {
-	oauthCfg, err := OAuthConfig(cfg, scopes)
-	if err != nil {
-		return "", err
-	}
-	codeChal, _, err := pkce()
-	if err != nil {
-		return "", err
-	}
-	state, err := randomString(32)
-	if err != nil {
-		return "", err
-	}
-	return oauthCfg.AuthCodeURL(
-		state,
-		oauth2.AccessTypeOffline,
-		oauth2.SetAuthURLParam("prompt", "consent"),
-		oauth2.SetAuthURLParam("code_challenge", codeChal),
-		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
-	), nil
-}
-
 func LoadToken() (*oauth2.Token, error) {
-	path, err := config.TokenPath()
+	store, err := activeStore()
 	if err != nil {
 		return nil, err
 	}
-	bytes, err := os.ReadFile(path)
+	bytes, err := store.Read()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, errors.New("not logged in; run `ghealth auth login`")
@@ -285,11 +283,8 @@ func LoadToken() (*oauth2.Token, error) {
 }
 
 func SaveToken(token *oauth2.Token) error {
-	path, err := config.TokenPath()
+	store, err := activeStore()
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	bytes, err := json.MarshalIndent(token, "", "  ")
@@ -297,26 +292,24 @@ func SaveToken(token *oauth2.Token) error {
 		return err
 	}
 	bytes = append(bytes, '\n')
-	return os.WriteFile(path, bytes, 0o600)
+	return store.Write(bytes)
 }
 
 func RevokeLocal() error {
-	path, err := config.TokenPath()
+	store, err := activeStore()
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+	return store.Delete()
 }
 
 func CurrentStatus() Status {
-	path, err := config.TokenPath()
-	status := Status{TokenPath: path}
+	var status Status
+	store, err := activeStore()
 	if err != nil {
 		return status
 	}
+	status.TokenPath = store.Location()
 	token, err := LoadToken()
 	if err != nil {
 		return status
