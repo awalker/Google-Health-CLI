@@ -85,6 +85,21 @@ ghealth rollup daily steps \
   --window-days 1
 ```
 
+Roll up daily nutrition logs:
+
+```sh
+ghealth rollup daily nutrition-log \
+  --from 2026-05-01 \
+  --to 2026-05-09 \
+  --window-days 1
+```
+
+List nutrition log entries:
+
+```sh
+ghealth data list nutrition-log --limit 100
+```
+
 Read profile, settings, and identity:
 
 ```sh
