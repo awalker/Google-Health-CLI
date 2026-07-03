@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -44,13 +43,7 @@ func Run(args []string, version string) int {
 		version: version,
 		opts:    output.Options{Format: output.FormatAuto},
 	}
-	cfg, err := config.Load()
-	if err == nil {
-		a.cfg = cfg
-	}
-	if err == nil {
-		err = a.run()
-	}
+	err := a.loadConfigAndRun()
 	if err != nil {
 		output.PrintError(a.errOut, unwrapUsage(err), a.opts, hintFor(err))
 	}
@@ -65,17 +58,36 @@ func RunWithWriters(args []string, version string, stdout, stderr io.Writer) int
 		version: version,
 		opts:    output.Options{Format: output.FormatJSON},
 	}
-	cfg, err := config.Load()
-	if err == nil {
-		a.cfg = cfg
-	}
-	if err == nil {
-		err = a.run()
-	}
+	err := a.loadConfigAndRun()
 	if err != nil {
 		output.PrintError(a.errOut, unwrapUsage(err), a.opts, hintFor(err))
 	}
 	return exitCodeFromError(err)
+}
+
+// loadConfigAndRun loads the config and executes the requested command.
+// Help and version must keep working even when the config file is
+// unreadable, so a config load error is only fatal for other commands.
+func (a *app) loadConfigAndRun() error {
+	cfg, cfgErr := config.Load()
+	a.cfg = cfg
+	if cfgErr != nil && !helpOrVersionRequested(a.args) {
+		return cfgErr
+	}
+	return a.run()
+}
+
+func helpOrVersionRequested(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	for _, arg := range args {
+		switch arg {
+		case "help", "-h", "--help", "version", "--version":
+			return true
+		}
+	}
+	return false
 }
 
 func (a *app) run() error {
@@ -836,9 +848,6 @@ func (a *app) client() (*healthapi.Client, error) {
 		return nil, fmt.Errorf("%w: %w", errAuth, err)
 	}
 	httpClient := oauth2.NewClient(context.Background(), source)
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
 	return healthapi.New(a.cfg.BaseURL, a.cfg.User, httpClient), nil
 }
 
@@ -915,9 +924,15 @@ func civilDateTime(value string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if month < 1 || month > 12 {
+		return nil, fmt.Errorf("invalid month %d: must be between 1 and 12", month)
+	}
 	day, err := parsePositiveInt(parts[2])
 	if err != nil {
 		return nil, err
+	}
+	if day < 1 || day > 31 {
+		return nil, fmt.Errorf("invalid day %d: must be between 1 and 31", day)
 	}
 	result := map[string]any{"date": map[string]any{"year": year, "month": month, "day": day}}
 	if timePart != "" {
