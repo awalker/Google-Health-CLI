@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -76,7 +77,57 @@ func TokenSource(ctx context.Context, cfg config.Config) (oauth2.TokenSource, er
 	if err != nil {
 		return nil, err
 	}
-	return oauthCfg.TokenSource(ctx, token), nil
+	return &persistingTokenSource{
+		source: oauthCfg.TokenSource(ctx, token),
+		last:   cloneToken(token),
+	}, nil
+}
+
+type persistingTokenSource struct {
+	source oauth2.TokenSource
+
+	mu   sync.Mutex
+	last *oauth2.Token
+}
+
+func (s *persistingTokenSource) Token() (*oauth2.Token, error) {
+	token, err := s.source.Token()
+	if err != nil {
+		return nil, err
+	}
+	if token == nil {
+		return nil, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if tokenEqual(token, s.last) {
+		return token, nil
+	}
+	if err := SaveToken(token); err != nil {
+		return nil, err
+	}
+	s.last = cloneToken(token)
+	return token, nil
+}
+
+func cloneToken(token *oauth2.Token) *oauth2.Token {
+	if token == nil {
+		return nil
+	}
+	clone := *token
+	return &clone
+}
+
+func tokenEqual(a, b *oauth2.Token) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.AccessToken == b.AccessToken &&
+		a.TokenType == b.TokenType &&
+		a.RefreshToken == b.RefreshToken &&
+		a.Expiry.Equal(b.Expiry) &&
+		a.ExpiresIn == b.ExpiresIn
 }
 
 func Login(ctx context.Context, cfg config.Config, opts LoginOptions) (*oauth2.Token, error) {
